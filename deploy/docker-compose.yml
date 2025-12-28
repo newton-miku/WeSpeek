@@ -1,0 +1,13 @@
+services:
+  wespeek:
+    image: newtonmiku/wespeek:latest
+    pull_policy: always
+    container_name: wespeek
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+    volumes:
+      - ./data:/data
+    environment:
+      - WSPEEK_ADDR=:7000
+  
