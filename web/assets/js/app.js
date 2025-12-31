@@ -18,6 +18,10 @@ const leaveBtn = document.getElementById('leave');
 const micSel = document.getElementById('mic');
 const membersEl = document.getElementById('members');
 const connStatus = document.getElementById('connStatus');
+
+let sendSequence = 0;
+let clientAudioStats = {}; // { uid: { expectedSeq, lost, received, late } }
+
 const chatListEl = document.getElementById('chatList');
 const chatTextEl = document.getElementById('chatText');
 const sendChatBtn = document.getElementById('sendChat');
@@ -257,7 +261,7 @@ async function getAudioStream() {
   const deviceId = micSel.value || undefined;
   const audio = deviceId ? { deviceId } : {};
   
-  if (noiseModeEl.value === 'smart') {
+  if (noiseModeEl.value === 'smart' || noiseModeEl.value === 'smart_gain') {
       // Smart mode (RNNoise): Disable native processing to get raw audio
       audio.noiseSuppression = false;
       audio.echoCancellation = true;
@@ -266,7 +270,7 @@ async function getAudioStream() {
       // Gate/None mode: Enable native noise suppression for basic cleanup
       audio.noiseSuppression = true;
       audio.echoCancellation = true;
-      audio.autoGainControl = false;
+      audio.autoGainControl = true;
   }
   return await navigator.mediaDevices.getUserMedia({ audio });
 }
@@ -330,8 +334,19 @@ function playAudioChunk(uid, arrayBuffer) {
         const { analyser } = getOrCreateUserAudioNodes(uid);
         source.connect(analyser);
         
-        let start = nextStartTime[uid] || audioCtx.currentTime;
-        start = Math.max(audioCtx.currentTime, start);
+        let start = nextStartTime[uid] || 0;
+        const now = audioCtx.currentTime;
+        
+        // Jitter Buffer Logic (40ms)
+        // If we ran dry (underrun) or just started, add a safety margin
+        // This prevents "machine gun" stuttering when packets arrive with jitter
+        if (start < now) {
+            start = now + 0.04;
+        } else if (start > now + 2.0) {
+            // Safety valve: If latency is too high (>2s), reset to avoid massive delay buildup
+            start = now + 0.04;
+        }
+
         source.start(start);
         nextStartTime[uid] = start + buffer.duration;
 
@@ -386,10 +401,26 @@ async function startAudioRecording() {
            const pcmBuffer = e.data;
            
            if (pcmBuffer.byteLength > 0) {
+               // Prepend Sequence Number (2 bytes)
+               const payload = new Uint8Array(2 + pcmBuffer.byteLength);
+               payload.set(new Uint8Array(pcmBuffer), 2); // Set data first
+               
+               const view = new DataView(payload.buffer);
+               // Sequence will be set only if we actually send
+               
+               let sent = false;
                if (audioWs && audioWs.readyState === WebSocket.OPEN) {
-                   audioWs.send(pcmBuffer);
+                   view.setUint16(0, sendSequence, true); // Little Endian
+                   audioWs.send(payload.buffer);
+                   sent = true;
                } else if (ws && ws.readyState === WebSocket.OPEN) {
-                   ws.send(pcmBuffer);
+                   view.setUint16(0, sendSequence, true); // Little Endian
+                   ws.send(payload.buffer);
+                   sent = true;
+               }
+
+               if (sent) {
+                   sendSequence = (sendSequence + 1) % 65536;
                }
            }
        };
@@ -442,7 +473,7 @@ async function setupInputPipeline() {
     if (hpFilter) { try { hpFilter.disconnect(); } catch (e) {} hpFilter = null; }
     if (compressor) { try { compressor.disconnect(); } catch (e) {} compressor = null; }
 
-    if (noiseModeEl.value === 'smart') {
+    if (noiseModeEl.value === 'smart' || noiseModeEl.value === 'smart_gain') {
         if (!noiseWorkletLoaded) {
             try {
                 await audioCtx.audioWorklet.addModule('/assets/js/rnnoise-processor.js');
@@ -485,7 +516,7 @@ async function setupInputPipeline() {
     // 2. Audio Path (Gate -> Compressor)
     let audioPathNode = hpFilter;
     
-    if (noiseModeEl.value === 'smart' && noiseWorkletLoaded) {
+    if ((noiseModeEl.value === 'smart' || noiseModeEl.value === 'smart_gain') && noiseWorkletLoaded) {
         try {
             // Fetch WASM if not cached
             if (!window.rnnoiseWasmBuffer) {
@@ -498,7 +529,8 @@ async function setupInputPipeline() {
             if (window.rnnoiseWasmBuffer) {
                 noiseNode = new AudioWorkletNode(audioCtx, 'noise-suppressor', {
                     processorOptions: {
-                        wasmBinary: window.rnnoiseWasmBuffer
+                        wasmBinary: window.rnnoiseWasmBuffer,
+                        agcEnabled: noiseModeEl.value === 'smart_gain'
                     }
                 });
                 noiseNode.onprocessorerror = (e) => console.error('RNNoise error:', e);
@@ -610,9 +642,70 @@ function handleWsAudio(data) {
     const uidLen = view.getUint8(0);
     const decoder = new TextDecoder();
     const uid = decoder.decode(data.slice(1, 1 + uidLen));
-    const audioData = data.slice(1 + uidLen);
-    // console.log('Audio packet:', uid, audioData.byteLength);
-    playAudioChunk(uid, audioData);
+    
+    // Check if payload has sequence number (length check)
+    // New protocol: [UID_LEN][UID][SEQ(2)][PCM...]
+    const payload = data.slice(1 + uidLen);
+    
+    if (payload.byteLength >= 2) {
+        const payloadView = new DataView(payload);
+        const seq = payloadView.getUint16(0, true);
+        const audioData = payload.slice(2);
+        
+        // Stats tracking
+        if (!clientAudioStats[uid]) {
+            clientAudioStats[uid] = { 
+                expectedSeq: (seq + 1) % 65536, 
+                buckets: Array(60).fill(0).map((_, i) => ({ tick: Math.floor(Date.now()/1000) - 59 + i, lost: 0, received: 0, late: 0 }))
+            };
+        }
+        
+        const stats = clientAudioStats[uid];
+        const nowSec = Math.floor(Date.now() / 1000);
+        
+        // Find or create current bucket
+        let bucket = stats.buckets.find(b => b.tick === nowSec);
+        if (!bucket) {
+             // Rotate: Remove oldest, add new
+             stats.buckets.shift();
+             bucket = { tick: nowSec, lost: 0, received: 0, late: 0 };
+             stats.buckets.push(bucket);
+        }
+
+        // Handle wrap-around logic
+        let d = seq - stats.expectedSeq;
+        if (d < -32768) d += 65536;
+        if (d > 32768) d -= 65536;
+        
+        // Resync logic: If gap is too large (> 500 packets ~ 20 seconds), assume stream reset/collision
+        if (Math.abs(d) > 500) {
+             console.warn(`Resync audio stats for ${uid}: expected ${stats.expectedSeq}, got ${seq}, diff ${d}`);
+            stats.expectedSeq = (seq + 1) % 65536;
+            bucket.received++;
+            // Do not count as lost
+        } else if (d === 0) {
+            // Perfect
+            stats.expectedSeq = (seq + 1) % 65536;
+            bucket.received++;
+        } else if (d > 0) {
+            // Lost packets
+            // console.warn(`Packet gap for ${uid}: expected ${stats.expectedSeq}, got ${seq}, lost ${d}`);
+            bucket.lost += d;
+            stats.expectedSeq = (seq + 1) % 65536;
+            bucket.received++;
+        } else {
+            // Late packet (reordering) or duplicate
+            bucket.late++;
+            bucket.received++;
+            // Don't update expectedSeq if late
+        }
+
+        
+        playAudioChunk(uid, audioData);
+    } else {
+        // Fallback for old protocol (should not happen if all updated)
+        playAudioChunk(uid, payload);
+    }
   } catch (e) {
     console.error('handleWsAudio error:', e);
   }
@@ -710,6 +803,10 @@ function send(obj) {
 async function joinRoom(targetId) {
   if (joinLock) return;
   joinLock = true;
+  // Reset stats
+  sendSequence = 0;
+  clientAudioStats = {};
+  
   try {
     let streamToReuse = null;
     if (connected) {
@@ -1359,12 +1456,13 @@ async function showUserDetails(uid, name) {
   modal.style.padding = '0';
   modal.style.borderRadius = '6px';
   modal.style.zIndex = '2000';
-  modal.style.width = '450px';
-  modal.style.maxHeight = '80vh';
+  modal.style.width = '90%';
+  modal.style.maxWidth = '450px';
+  modal.style.maxHeight = '90vh';
   modal.style.overflowY = 'auto';
   modal.style.boxShadow = '0 0 15px rgba(0,0,0,0.8)';
   modal.style.fontFamily = 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif';
-  modal.style.fontSize = '12px';
+  modal.style.fontSize = '14px'; // Slightly larger for readability
   modal.style.border = '1px solid #444';
   
   // Header
@@ -1377,6 +1475,7 @@ async function showUserDetails(uid, name) {
   header.textContent = '客户端连接信息';
   
   let latestServerStats = extendedInfo ? extendedInfo.stats : null;
+  let serverStatsHistory = [];
   window.onUserInfoUpdate = (params) => {
       if (params.uid === uid) {
           if (params.stats) latestServerStats = params.stats;
@@ -1401,7 +1500,8 @@ async function showUserDetails(uid, name) {
   
   const closeBtn = document.createElement('button');
   closeBtn.textContent = '关闭';
-  closeBtn.style.padding = '4px 12px';
+  closeBtn.style.padding = '8px 24px'; // Larger touch target
+  closeBtn.style.fontSize = '14px';
   closeBtn.style.background = '#444';
   closeBtn.style.color = '#fff';
   closeBtn.style.border = '1px solid #555';
@@ -1474,6 +1574,8 @@ async function showUserDetails(uid, name) {
     
     if (found) {
         const rows = [];
+        let serverWindowLost = 0;
+
         rows.push(createRow('延迟 (RTT)', `${latency} ms`));
         if (extendedInfo && extendedInfo.ip) {
             rows.push(createRow('IP 地址', extendedInfo.ip));
@@ -1504,11 +1606,51 @@ async function showUserDetails(uid, name) {
             rows.push(createRow('接收', `${rx} pkts (${fmtBytes(rxBytes)})`));
             rows.push(createRow('发送', `${tx} pkts (${fmtBytes(txBytes)})`));
             
+            // Server Stats (1-min Window)
+            const now = Date.now();
+            serverStatsHistory.push({ time: now, stats: latestServerStats });
+            serverStatsHistory = serverStatsHistory.filter(x => x.time > now - 60000);
+
             let lossText = '0%';
-            if (rx + rxLost > 0) {
-                 lossText = ((rxLost / (rx + rxLost)) * 100).toFixed(2) + '%';
+            let windowRx = 0;
+            let windowLost = 0;
+            
+            if (serverStatsHistory.length > 1) {
+                const newest = serverStatsHistory[serverStatsHistory.length - 1].stats;
+                const oldest = serverStatsHistory[0].stats;
+                
+                windowRx = (newest.packetsSent || 0) - (oldest.packetsSent || 0);
+                windowLost = (newest.sentPacketsLost || 0) - (oldest.sentPacketsLost || 0);
+                
+                if (windowRx + windowLost > 0) {
+                     lossText = ((windowLost / (windowRx + windowLost)) * 100).toFixed(2) + '%';
+                }
+            } else {
+                // Fallback to cumulative if not enough history
+                if (rx + rxLost > 0) {
+                     lossText = ((rxLost / (rx + rxLost)) * 100).toFixed(2) + '%';
+                }
             }
-            rows.push(createRow('丢包率 (下行)', lossText));
+            
+            serverWindowLost = windowLost;
+            rows.push(createRow('下载丢包', lossText));
+        }
+
+        if (clientAudioStats[uid]) {
+            const stats = clientAudioStats[uid];
+            const nowSec = Math.floor(Date.now() / 1000);
+            let totalLost = 0;
+            let totalReceived = 0;
+            let totalLate = 0;
+            
+            stats.buckets.forEach(b => {
+                if (b.tick > nowSec - 60) {
+                    totalLost += b.lost;
+                    totalReceived += b.received;
+                    totalLate += b.late;  
+                }
+            });
+            rows.push(createRow('乱序/重复', `${totalLate} pkts`));
         }
 
         content.innerHTML = createSection('连接统计', rows);

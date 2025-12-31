@@ -436,7 +436,7 @@ button:disabled {
   background: transparent;
   outline: none;
   cursor: pointer;
-  margin: 0;
+  margin: 10px 0; /* Ensure space for thumb */
   vertical-align: middle;
 }
 
@@ -447,13 +447,39 @@ button:disabled {
   cursor: pointer;
   border-radius: 3px;
   /* Layered Background: 
-     1. Level Meter (Top, Bright) 
-     2. Value Fill (Middle, Dim) 
-     3. Track Base (Bottom, Dark) 
+     1. Level Meter (Top, Bright, Segmented Colors)
+        This gradient covers the FULL width, but is masked by background-size to show only the current level.
+        So low levels only reveal the green part, high levels reveal yellow/red.
   */
   background-image: 
-    linear-gradient(to right, #2ecc71 var(--level-percent, 0%), transparent var(--level-percent, 0%)),
+    linear-gradient(to right, 
+      #2ecc71 0%, 
+      #2ecc71 60%, 
+      #f1c40f 60%, 
+      #f1c40f 85%, 
+      #e74c3c 85%, 
+      #e74c3c 100%),
     linear-gradient(to right, rgba(75, 139, 255, 0.3) var(--value-percent, 0%), #2a2a3d var(--value-percent, 0%));
+  
+
+  
+  background-image: 
+    /* 1. The Curtain (Hides the unused meter part) */
+    linear-gradient(to right, transparent var(--level-percent, 0%), #2a2a3d var(--level-percent, 0%)),
+    
+    /* 2. The Value Thumb Position Indicator (Optional, faint blue fill for the setting) */
+    linear-gradient(to right, rgba(75, 139, 255, 0.3) var(--value-percent, 0%), transparent var(--value-percent, 0%)),
+    
+    /* 3. The Full Static Rainbow Meter (Bottom Layer) */
+    linear-gradient(to right, 
+      #2ecc71 0%, 
+      #2ecc71 60%, 
+      #f1c40f 60%, 
+      #f1c40f 85%, 
+      #e74c3c 85%, 
+      #e74c3c 100%);
+  
+  background-size: 100% 100%;
   background-repeat: no-repeat;
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.3);
 }
@@ -465,20 +491,35 @@ button:disabled {
   cursor: pointer;
   border-radius: 3px;
   background-image: 
-    linear-gradient(to right, #2ecc71 var(--level-percent, 0%), transparent var(--level-percent, 0%)),
-    linear-gradient(to right, rgba(75, 139, 255, 0.3) var(--value-percent, 0%), #2a2a3d var(--value-percent, 0%));
+    /* 1. The Curtain (Hides the unused meter part) */
+    linear-gradient(to right, transparent var(--level-percent, 0%), #2a2a3d var(--level-percent, 0%)),
+    
+    /* 2. The Value Thumb Position Indicator */
+    linear-gradient(to right, rgba(75, 139, 255, 0.3) var(--value-percent, 0%), transparent var(--value-percent, 0%)),
+    
+    /* 3. The Full Static Rainbow Meter */
+    linear-gradient(to right, 
+      #2ecc71 0%, 
+      #2ecc71 60%, 
+      #f1c40f 60%, 
+      #f1c40f 85%, 
+      #e74c3c 85%, 
+      #e74c3c 100%);
+  
+  background-size: 100% 100%;
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.3);
 }
 
 /* WebKit Thumb */
 .vol-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
-  height: 14px;
-  width: 14px;
+  height: 18px;
+  width: 18px;
   border-radius: 50%;
-  background: #fff;
+  background: #ffffff;
+  border: 2px solid var(--accent);
   cursor: pointer;
-  margin-top: -4px; /* Center thumb: (6 - 14) / 2 */
+  margin-top: -6px; /* Center thumb: (6 - 18) / 2 */
   box-shadow: 0 1px 3px rgba(0,0,0,0.4);
   transition: transform 0.1s;
 }
@@ -489,11 +530,11 @@ button:disabled {
 
 /* Firefox Thumb */
 .vol-slider::-moz-range-thumb {
-  height: 14px;
-  width: 14px;
-  border: none;
+  height: 18px;
+  width: 18px;
+  border: 2px solid var(--accent);
   border-radius: 50%;
-  background: #fff;
+  background: #ffffff;
   cursor: pointer;
   box-shadow: 0 1px 3px rgba(0,0,0,0.4);
   transition: transform 0.1s;
@@ -567,65 +608,7 @@ button:disabled {
   font-weight: 500;
 }
 
-.vol-slider {
-  width: 100%;
-  background: transparent;
-  -webkit-appearance: none;
-  appearance: none;
-  margin: 10px 0; /* Ensure space for thumb */
-}
 
-.vol-slider:focus {
-  outline: none;
-}
-
-/* Track */
-.vol-slider::-webkit-slider-runnable-track {
-  width: 100%;
-  height: 6px;
-  cursor: pointer;
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 999px;
-  border: none;
-}
-
-/* Thumb */
-.vol-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  height: 18px;
-  width: 18px;
-  border-radius: 50%;
-  background: #ffffff;
-  border: 2px solid var(--accent);
-  cursor: pointer;
-  margin-top: -6px; /* Center thumb: (6px - 18px) / 2 */
-  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-  transition: transform 0.1s ease;
-}
-
-.vol-slider::-webkit-slider-thumb:hover {
-  transform: scale(1.1);
-}
-
-/* Firefox Support */
-.vol-slider::-moz-range-track {
-  width: 100%;
-  height: 6px;
-  cursor: pointer;
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 999px;
-  border: none;
-}
-
-.vol-slider::-moz-range-thumb {
-  height: 18px;
-  width: 18px;
-  border: 2px solid var(--accent);
-  border-radius: 50%;
-  background: #ffffff;
-  cursor: pointer;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-}
 
 /* Modals */
 .modal-backdrop {

@@ -49,7 +49,14 @@ class NoiseSuppressorWorklet extends AudioWorkletProcessor {
         // AGC State
         this._agcGain = 1.0;
         this._targetLevel = 0.15; // Target RMS level
-        this._maxGain = 30.0;
+        this._maxGain = 6.0; // Reduced from 30.0 to 6.0 (approx 15dB) to prevent explosion
+        this._lastVadProb = 0.0; // Track VAD for Smart AGC
+        this._agcEnabled = options.processorOptions && !!options.processorOptions.agcEnabled;
+        
+        // If AGC is disabled, ensure we don't apply residual gain
+        if (!this._agcEnabled) {
+            this._agcGain = 1.0;
+        }
 
         // Gate State
         this._gateGain = 0.0;
@@ -94,22 +101,41 @@ class NoiseSuppressorWorklet extends AudioWorkletProcessor {
 
         // Calculate target gain
         let targetGain = this._agcGain;
-        if (rms > 0.0001) {
-            targetGain = this._targetLevel / rms;
-        } else {
-            targetGain = this._maxGain; // Boost silence to max to find signal? Or stay unity? 
-            // If silence, don't boost indefinitely. Keep previous gain or drift to 1.
-            targetGain = 1.0; 
-        }
         
-        // Clamp gain
-        if (targetGain > this._maxGain) targetGain = this._maxGain;
-        if (targetGain < 1.0) targetGain = 1.0; // Don't attenuate below unity
+        if (this._agcEnabled) {
+            if (rms > 0.0001) {
+                targetGain = this._targetLevel / rms;
+            } else {
+                // Silence. Don't boost. Drift to unity.
+                targetGain = 1.0; 
+            }
+            
+            // Smart VAD-based Gain Limiting
+            if (this._lastVadProb < 0.3) {
+                 // If it's likely noise, cap the gain aggressively.
+                 // Lowered from 3.0 to 1.5 for extra safety against "explosions"
+                 if (targetGain > 1.5) targetGain = 1.5;
+            }
+    
+            // Global clamp
+            if (targetGain > this._maxGain) targetGain = this._maxGain;
+            if (targetGain < 1.0) targetGain = 1.0; // Don't attenuate below unity
 
-        // Smooth update (Attack fast, Release slow? or just slow?)
-        // AGC should be relatively slow to avoid pumping.
-        const agcAlpha = 0.005; 
-        this._agcGain = this._agcGain * (1 - agcAlpha) + targetGain * agcAlpha;
+            // Asymmetric Smoothing (Smart Attack/Release)
+            // Release (Reducing Gain): FAST. If signal is loud, drop gain immediately to prevent clipping.
+            // Attack (Increasing Gain): SLOW. If signal is quiet, boost slowly to avoid pumping.
+            let agcAlpha = 0.005; 
+            if (targetGain < this._agcGain) {
+                agcAlpha = 0.15; // Fast Release (e.g. 100ms)
+            } else {
+                agcAlpha = 0.002; // Slow Attack (e.g. 2s)
+            }
+    
+            this._agcGain = this._agcGain * (1 - agcAlpha) + targetGain * agcAlpha;
+        } else {
+            targetGain = 1.0;
+            this._agcGain = 1.0; // Force unity gain
+        }
 
         // Apply AGC to input buffer before appending
         // We clone input to avoid side effects if reused
@@ -130,6 +156,7 @@ class NoiseSuppressorWorklet extends AudioWorkletProcessor {
             this._buffer = this._buffer.slice(this._denoiseSampleSize);
             
             const { output: processed, vadProb } = this._processor.process(frame);
+            this._lastVadProb = vadProb; // Update VAD for AGC Feedback loop
             
             // --- 2. VAD Gate (Post-processing) ---
             let targetGate = 0.0;
