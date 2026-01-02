@@ -59,6 +59,7 @@ func (c *Client) readLoop() {
 			c.peer.close()
 		}
 		c.server.clients.Delete(c.id)
+		c.server.latencySubs.Delete(c.id)
 		close(c.msgCh)
 		c.conn.Close()
 	}()

@@ -2,6 +2,7 @@ package server
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/newton-miku/WeSpeek/internal/domain/entity"
@@ -17,6 +18,7 @@ type Server struct {
 	// State
 	rooms           sync.Map // map[string]*room
 	clients         sync.Map // map[string]func(interface{})
+	latencySubs     sync.Map // map[string]func(interface{})
 	adminChallenges sync.Map
 	groups          sync.Map // map[string]struct{}
 }
@@ -76,15 +78,51 @@ func (s *Server) Init() error {
 	go s.startCleanupLoop()
 
 	// Start latency broadcast loop
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			s.broadcastRoomsUpdate()
-		}
-	}()
+	go s.startLatencyLoop()
 
 	return nil
+}
+
+func (s *Server) startLatencyLoop() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// Collect latencies
+		latencies := make(map[string]int64)
+		s.rooms.Range(func(_, value any) bool {
+			rm := value.(*room)
+			rm.mu.RLock()
+			for uid, p := range rm.peers {
+				l := atomic.LoadInt64(&p.latency)
+				if l > 0 {
+					latencies[uid] = l
+				}
+			}
+			rm.mu.RUnlock()
+			return true
+		})
+
+		if len(latencies) == 0 {
+			continue
+		}
+
+		// Broadcast to subscribers
+		out := struct {
+			Method string           `json:"method"`
+			Params map[string]int64 `json:"params"`
+		}{
+			Method: "latency.update",
+			Params: latencies,
+		}
+
+		s.latencySubs.Range(func(key, value any) bool {
+			if fn, ok := value.(func(interface{})); ok {
+				fn(out)
+			}
+			return true
+		})
+	}
 }
 
 func (s *Server) startCleanupLoop() {

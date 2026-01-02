@@ -774,12 +774,27 @@ function connectWS() {
       if (window.onUserInfoUpdate) {
         window.onUserInfoUpdate(msg.params);
       }
+    } else if (msg.method === 'latency.update') {
+      if (msg.params) {
+        Object.entries(msg.params).forEach(([uid, lat]) => {
+           for (const r of lastRoomsData) {
+               if (r.members) {
+                   const m = r.members.find(u => u.uid === uid);
+                   if (m) {
+                       m.latency = lat;
+                       break;
+                   }
+               }
+           }
+        });
+      }
     }
   };
   ws.onopen = () => {
     connStatus.textContent = '信令已连接';
     connStatus.className = 'status ok';
     loadPublicHistory();
+    // send({ method: 'latency.subscribe' }); // Moved to on-demand in showUserDetails
     
     // Auto-join room from URL
     const params = new URLSearchParams(window.location.search);
@@ -1445,6 +1460,9 @@ async function showUserDetails(uid, name) {
       });
   } catch {}
 
+  // Subscribe to latency updates when modal opens
+  send({ method: 'latency.subscribe' });
+
   const modal = document.createElement('div');
   modal.id = 'detailsModal';
   modal.style.position = 'fixed';
@@ -1510,6 +1528,9 @@ async function showUserDetails(uid, name) {
   closeBtn.onmouseover = () => closeBtn.style.background = '#555';
   closeBtn.onmouseout = () => closeBtn.style.background = '#444';
   closeBtn.onclick = () => {
+    // Unsubscribe from latency updates
+    send({ method: 'latency.unsubscribe' });
+
     modal.remove();
     backdrop.remove();
     window.onUserInfoUpdate = null;
@@ -2177,15 +2198,27 @@ async function getAdminHeaders() {
   return { 'X-Admin-Auth': auth };
 }
 
+let cachedAdminAuth = null;
+
 async function getAdminAuthStr() {
   const token = getAdminToken();
   if (!token) throw new Error('需要管理员令牌');
+
+  // Check cache
+  if (cachedAdminAuth && (Date.now() / 1000) < cachedAdminAuth.exp) {
+    return cachedAdminAuth.authStr;
+  }
+
   const res = await fetch('/api/admin/challenge', { method: 'GET' });
   if (!res.ok) throw new Error('无法获取挑战');
   const data = await res.json();
   const nonce = data.nonce;
+  const exp = data.exp;
   const macHex = await hmacSha256Hex(token, nonce);
-  return `${nonce}:${macHex}`;
+  
+  const authStr = `${nonce}:${macHex}`;
+  cachedAdminAuth = { authStr, exp: exp - 5 }; // Buffer 5s
+  return authStr;
 }
 async function hmacSha256Hex(keyStr, msgStr) {
   const enc = new TextEncoder();

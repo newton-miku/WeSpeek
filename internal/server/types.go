@@ -93,10 +93,12 @@ type RoomInfo struct {
 }
 
 type RoomMemberSummary struct {
-	UID      string `json:"uid"`
-	Name     string `json:"name"`
-	Latency  int64  `json:"latency"`
-	JoinTime int64  `json:"joinTime"`
+	UID            string `json:"uid"`
+	Name           string `json:"name"`
+	InputDisabled  bool   `json:"inputDisabled"`
+	OutputDisabled bool   `json:"outputDisabled"`
+	Latency        int64  `json:"latency"`
+	JoinTime       int64  `json:"joinTime"`
 }
 
 type roomsUpdateParams struct {

@@ -18,10 +18,12 @@ func (s *Server) GetRoomsSnapshot() []RoomInfo {
 		rmIDs := make([]RoomMemberSummary, 0, len(rm.peers))
 		for uid, p := range rm.peers {
 			rmIDs = append(rmIDs, RoomMemberSummary{
-				UID:      uid,
-				Name:     p.name,
-				Latency:  atomic.LoadInt64(&p.latency),
-				JoinTime: p.joinTime.Unix(),
+				UID:            uid,
+				Name:           p.name,
+				InputDisabled:  p.inputDisabled,
+				OutputDisabled: p.outputDisabled,
+				Latency:        atomic.LoadInt64(&p.latency),
+				JoinTime:       p.joinTime.Unix(),
 			})
 		}
 		rm.mu.RUnlock()
@@ -114,7 +116,13 @@ func (s *Server) GetRoomMembers(id string) ([]RoomMemberSummary, error) {
 	rm.mu.RLock()
 	ids := make([]RoomMemberSummary, 0, len(rm.peers))
 	for uid, p := range rm.peers {
-		ids = append(ids, RoomMemberSummary{UID: uid, Name: p.name, Latency: atomic.LoadInt64(&p.latency)})
+		ids = append(ids, RoomMemberSummary{
+			UID:            uid,
+			Name:           p.name,
+			InputDisabled:  p.inputDisabled,
+			OutputDisabled: p.outputDisabled,
+			Latency:        atomic.LoadInt64(&p.latency),
+		})
 	}
 	rm.mu.RUnlock()
 	sort.Slice(ids, func(i, j int) bool {

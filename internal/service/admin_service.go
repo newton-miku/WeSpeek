@@ -34,7 +34,7 @@ func NewAdminService(repo repository.AdminRepository) *AdminService {
 
 func (s *AdminService) CreateAdminChallenge() (string, int64) {
 	nonce := util.RandString() + util.RandString()
-	exp := time.Now().Add(2 * time.Minute).Unix()
+	exp := time.Now().Add(30 * time.Minute).Unix()
 	s.adminChallenges.Store(nonce, exp)
 	return nonce, exp
 }
@@ -78,7 +78,7 @@ func (s *AdminService) VerifyAdmin(nonce, macHex string) bool {
 	})
 
 	if verified {
-		s.adminChallenges.Delete(nonce) // single-use
+		// s.adminChallenges.Delete(nonce) // reuse allowed within window
 		return true
 	}
 	return false

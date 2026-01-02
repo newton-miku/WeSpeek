@@ -43,7 +43,24 @@ func (s *Server) dispatchRPC(c *Client, m rpcMessage) {
 		s.handleAdminCreateGroup(c, m.Params)
 	case "admin.delete_group":
 		s.handleAdminDeleteGroup(c, m.Params)
+	case "latency.subscribe":
+		s.handleLatencySubscribe(c)
+	case "latency.unsubscribe":
+		s.handleLatencyUnsubscribe(c)
 	}
+}
+
+func (s *Server) handleLatencySubscribe(c *Client) {
+	s.latencySubs.Store(c.id, func(v interface{}) {
+		select {
+		case c.msgCh <- v:
+		default:
+		}
+	})
+}
+
+func (s *Server) handleLatencyUnsubscribe(c *Client) {
+	s.latencySubs.Delete(c.id)
 }
 
 func (s *Server) handleSubscribe(c *Client) {
