@@ -26,7 +26,12 @@ func (s *Server) WSHandler(w http.ResponseWriter, r *http.Request) {
 	ip := s.resolveIP(r)
 
 	client := s.newClient(conn, id, ip)
-	s.clients.Store(id, func(v interface{}) { client.msgCh <- v })
+	s.clients.Store(id, func(v interface{}) {
+		select {
+		case client.msgCh <- v:
+		default:
+		}
+	})
 
 	go client.writeLoop()
 	client.readLoop()

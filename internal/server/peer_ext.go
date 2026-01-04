@@ -17,17 +17,19 @@ func (p *peer) broadcastBinary(data []byte) {
 	copy(payload[1:], uidBytes)
 	copy(payload[1+len(uidBytes):], data)
 
+	var recipients []*peer
 	p.room.mu.RLock()
-	defer p.room.mu.RUnlock()
-
 	for _, other := range p.room.peers {
 		if other.uid == p.uid {
 			continue
 		}
+		recipients = append(recipients, other)
+	}
+	p.room.mu.RUnlock()
 
+	for _, other := range recipients {
 		atomic.AddUint64(&other.bytesSent, uint64(len(payload)))
 		atomic.AddUint64(&other.packetsSent, 1)
-
 		if other.audioSend != nil {
 			other.audioSend(payload)
 		} else {

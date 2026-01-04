@@ -89,6 +89,7 @@ func (s *Server) AudioWSHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		for data := range sendCh {
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 				return
 			}

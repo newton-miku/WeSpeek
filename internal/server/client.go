@@ -22,7 +22,7 @@ func (s *Server) newClient(conn *websocket.Conn, id, ip string) *Client {
 	return &Client{
 		server:   s,
 		conn:     conn,
-		msgCh:    make(chan interface{}, 64),
+		msgCh:    make(chan interface{}, 256),
 		id:       id,
 		remoteIP: ip,
 	}
@@ -41,8 +41,10 @@ func (c *Client) writeLoop() {
 			}
 			switch v := m.(type) {
 			case []byte:
+				_ = c.conn.SetWriteDeadline(time.Now().Add(time.Second))
 				_ = c.conn.WriteMessage(websocket.BinaryMessage, v)
 			default:
+				_ = c.conn.SetWriteDeadline(time.Now().Add(time.Second))
 				_ = c.conn.WriteJSON(v)
 			}
 		case <-pingTicker.C:
@@ -89,12 +91,12 @@ func (c *Client) readLoop() {
 			}
 			continue
 		}
-		
+
 		var m rpcMessage
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
-		
+
 		c.server.dispatchRPC(c, m)
 	}
 }

@@ -101,7 +101,12 @@ func (s *Server) handleJoin(c *Client, params json.RawMessage) {
 	ip := c.remoteIP
 
 	// Create peer and link to client
-	c.peer = s.newPeer(prm.UID, name, ip, rm, func(v interface{}) { c.msgCh <- v })
+	c.peer = s.newPeer(prm.UID, name, ip, rm, func(v interface{}) {
+		select {
+		case c.msgCh <- v:
+		default:
+		}
+	})
 
 	roomHistory, _ := s.GetRoomChatHistory(rm.id)
 	if roomHistory == nil {
