@@ -2266,28 +2266,58 @@ checkAdminSetup();
 
 connectWS();
 function showSliderBubble(el, text) {
-  const rect = el.getBoundingClientRect();
-  const min = parseFloat(el.min || '0');
-  const max = parseFloat(el.max || '100');
-  const val = parseFloat(el.value || '0');
-  const ratio = Math.min(1, Math.max(0, (val - min) / (max - min)));
-  const x = rect.left + ratio * rect.width;
-  const y = rect.top;
-  const bubble = document.createElement('div');
-  bubble.style.position = 'fixed';
-  bubble.style.left = `${x}px`;
-  bubble.style.top = `${y - 24}px`;
-  bubble.style.transform = 'translateX(-50%)';
-  bubble.style.padding = '2px 6px';
-  bubble.style.fontSize = '12px';
-  bubble.style.background = 'var(--bg-secondary)';
-  bubble.style.border = '1px solid var(--border-color)';
-  bubble.style.borderRadius = '4px';
-  bubble.style.color = 'var(--text-primary)';
-  bubble.style.zIndex = '1000';
-  bubble.textContent = text;
-  document.body.appendChild(bubble);
-  setTimeout(() => { bubble.remove(); }, 800);
+  if (el._bubbleTimer) {
+    clearTimeout(el._bubbleTimer);
+    el._bubbleTimer = null;
+  }
+
+  let bubble = el._bubbleEl;
+  if (!bubble) {
+    bubble = document.createElement('div');
+    bubble.style.position = 'fixed';
+    bubble.style.transform = 'translateX(-50%)';
+    bubble.style.padding = '2px 6px';
+    bubble.style.fontSize = '12px';
+    bubble.style.background = 'var(--bg-secondary)';
+    bubble.style.border = '1px solid var(--border-color)';
+    bubble.style.borderRadius = '4px';
+    bubble.style.color = 'var(--text-primary)';
+    bubble.style.zIndex = '1000';
+    bubble.style.pointerEvents = 'none';
+    // Optimization: Use will-change to hint browser about layout changes
+    bubble.style.willChange = 'left, top';
+    document.body.appendChild(bubble);
+    el._bubbleEl = bubble;
+    // Cache rect when bubble is created (start of interaction)
+    el._cachedRect = el.getBoundingClientRect();
+  }
+
+  // Use requestAnimationFrame for smoother updates
+  if (el._rafId) cancelAnimationFrame(el._rafId);
+  el._rafId = requestAnimationFrame(() => {
+    // Use cached rect if available to avoid layout thrashing
+    const rect = el._cachedRect || el.getBoundingClientRect();
+    const min = parseFloat(el.min || '0');
+    const max = parseFloat(el.max || '100');
+    const val = parseFloat(el.value || '0');
+    const ratio = Math.min(1, Math.max(0, (val - min) / (max - min)));
+    const x = rect.left + ratio * rect.width;
+    const y = rect.top;
+
+    bubble.style.left = `${x}px`;
+    bubble.style.top = `${y - 24}px`;
+    bubble.textContent = text;
+    el._rafId = null;
+  });
+
+  el._bubbleTimer = setTimeout(() => { 
+    if (el._rafId) cancelAnimationFrame(el._rafId);
+    if (bubble.parentNode) bubble.remove(); 
+    el._bubbleEl = null;
+    el._bubbleTimer = null;
+    el._cachedRect = null; // Clear cache
+    el._rafId = null;
+  }, 800);
 }
 inputGainSlider.oninput = (e) => {
   if (inputGainNode) inputGainNode.gain.value = inputGainSlider.value / 100;
