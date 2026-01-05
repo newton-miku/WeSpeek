@@ -2177,8 +2177,20 @@ function renderChatList() {
   list.forEach(msg => {
     const line = createChatLine(msg);
     chatListEl.appendChild(line);
+    
+    // Ensure scroll to bottom when images load
+    const imgs = line.querySelectorAll('img');
+    imgs.forEach(img => {
+        img.addEventListener('load', () => {
+            chatListEl.scrollTop = chatListEl.scrollHeight;
+        });
+    });
   });
   chatListEl.scrollTop = chatListEl.scrollHeight;
+  // Double check scroll after a short delay to ensure rendering is complete
+  setTimeout(() => {
+      chatListEl.scrollTop = chatListEl.scrollHeight;
+  }, 100);
 }
 function appendPublic(msg) {
   publicMsgs.push(msg);
