@@ -98,6 +98,7 @@ function getSvgOrImg(name, classes) {
 let audioCtx, inputGainNode, masterGainNode, inputAnalyser, outputAnalyser, masterAnalyser, inputDest;
 let hpFilter, compressor, gateGain;
 let mediaSourceNode, noiseNode; // Track these globally for cleanup
+const cacheBust = '?v=' + Date.now();
  // Add track ID to UID mapping
 const trackStreamMap = new Map();
 const statsHistoryMap = new Map(); // Store detailed stats history per uid
@@ -318,22 +319,150 @@ function getOrCreateUserAudioNodes(uid) {
 }
 
 let nextStartTime = {};
-const targetSampleRate = 16000;
+let targetSampleRate = 16000;
+let currentCodec = 'opus';
+let currentQuality = 6;
+let effectiveCodec = 'pcm16';
+const adpcmEncState = { predictor: 0, index: 0 };
+const adpcmDecState = new Map();
+
+const IMA_INDEX_TABLE = new Int8Array([ -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8 ]);
+const IMA_STEP_TABLE = new Int16Array([
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28,
+  31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107,
+  118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337,
+  371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963, 1060,
+  1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749,
+  3024, 3327, 3660, 4026, 4428, 4871, 5367, 5919, 6535, 7223,
+  7985, 8827, 9752, 10767, 11877, 13086, 14404, 15837, 17388,
+  19071, 20899, 22886, 25054, 27409, 29967, 32767
+]);
+
+function clamp(n, min, max) { return n < min ? min : (n > max ? max : n); }
+
+function encodeImaAdpcm(int16) {
+  let pred = adpcmEncState.predictor|0;
+  let idx = adpcmEncState.index|0;
+  const out = new Uint8Array(Math.ceil(int16.length / 2));
+  let oi = 0;
+  for (let i = 0; i < int16.length; i += 2) {
+    let b0 = 0, b1 = 0;
+    for (let k = 0; k < 2 && (i + k) < int16.length; k++) {
+      let sample = int16[i + k];
+      let step = IMA_STEP_TABLE[idx];
+      let diff = sample - pred;
+      let code = 0;
+      if (diff < 0) { code = 8; diff = -diff; }
+      let mask = [4,2,1];
+      let vpdiff = step >> 3;
+      for (let j = 0; j < 3; j++) {
+        if (diff > step) { code |= mask[j]; diff -= step; vpdiff += step; }
+        step >>= 1;
+      }
+      if (code & 8) pred -= vpdiff; else pred += vpdiff;
+      pred = clamp(pred, -32768, 32767);
+      idx += IMA_INDEX_TABLE[code];
+      idx = clamp(idx, 0, 88);
+      if (k === 0) b0 = code; else b1 = code;
+    }
+    out[oi++] = (b1 << 4) | (b0 & 0xF);
+  }
+  adpcmEncState.predictor = pred;
+  adpcmEncState.index = idx;
+  return out;
+}
+
+function getOrInitDecState(uid) {
+  let st = adpcmDecState.get(uid);
+  if (!st) { st = { predictor: 0, index: 0 }; adpcmDecState.set(uid, st); }
+  return st;
+}
+
+function decodeImaAdpcm(uid, bytes) {
+  const st = getOrInitDecState(uid);
+  let pred = st.predictor|0;
+  let idx = st.index|0;
+  const out = new Int16Array(bytes.length * 2);
+  let oi = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    const v = bytes[i];
+    for (let s = 0; s < 2; s++) {
+      const code = s === 0 ? (v & 0xF) : (v >> 4);
+      let step = IMA_STEP_TABLE[idx];
+      let vpdiff = step >> 3;
+      if (code & 4) vpdiff += step;
+      if (code & 2) vpdiff += (step >> 1);
+      if (code & 1) vpdiff += (step >> 2);
+      if (code & 8) pred -= vpdiff; else pred += vpdiff;
+      pred = clamp(pred, -32768, 32767);
+      idx += IMA_INDEX_TABLE[code];
+      idx = clamp(idx, 0, 88);
+      out[oi++] = pred;
+    }
+  }
+  st.predictor = pred;
+  st.index = idx;
+  return out;
+}
+
+function mapQualityToSampleRate(q) {
+  const n = Math.max(1, Math.min(10, parseInt(q || 6, 10)));
+  switch (n) {
+    case 1: return 8000;
+    case 2: return 12000;
+    case 3: return 16000;
+    case 4: return 24000;
+    case 5: return 32000;
+    case 6: return 16000;
+    case 7: return 24000;
+    case 8: return 32000;
+    case 9: return 44100;
+    case 10: return 48000;
+    default: return 16000;
+  }
+}
+
+function updateRoomAudioSettingsById(roomId) {
+  const r = (lastRoomsData || []).find(x => x.id === roomId);
+  if (!r) return;
+  currentCodec = r.audioCodec || 'opus';
+  currentQuality = r.audioQuality || 6;
+  targetSampleRate = mapQualityToSampleRate(currentQuality);
+  effectiveCodec = (currentCodec === 'pcmf32' ? 'pcmf32' : 'pcm16');
+  if (recorderProcessor) {
+    stopAudioRecording();
+    startAudioRecording();
+  }
+}
 
 function playAudioChunk(uid, arrayBuffer) {
     try {
         if (audioCtx.state === 'suspended') audioCtx.resume();
-        
-        const pcmData = new Int16Array(arrayBuffer);
-        const floatData = new Float32Array(pcmData.length);
-        
-        for (let i = 0; i < pcmData.length; i++) {
-            const int = pcmData[i];
-            floatData[i] = int < 0 ? int / 0x8000 : int / 0x7FFF;
+        let buffer;
+        if (currentCodec === 'ima_adpcm') {
+            const adpcm = new Uint8Array(arrayBuffer);
+            const pcm16 = decodeImaAdpcm(uid, adpcm);
+            const floatData = new Float32Array(pcm16.length);
+            for (let i = 0; i < pcm16.length; i++) {
+                const int = pcm16[i];
+                floatData[i] = int < 0 ? int / 0x8000 : int / 0x7FFF;
+            }
+            buffer = audioCtx.createBuffer(1, floatData.length, targetSampleRate);
+            buffer.copyToChannel(floatData, 0);
+        } else if (effectiveCodec === 'pcmf32') {
+            const floatData = new Float32Array(arrayBuffer);
+            buffer = audioCtx.createBuffer(1, floatData.length, targetSampleRate);
+            buffer.copyToChannel(floatData, 0);
+        } else {
+            const pcmData = new Int16Array(arrayBuffer);
+            const floatData = new Float32Array(pcmData.length);
+            for (let i = 0; i < pcmData.length; i++) {
+                const int = pcmData[i];
+                floatData[i] = int < 0 ? int / 0x8000 : int / 0x7FFF;
+            }
+            buffer = audioCtx.createBuffer(1, floatData.length, targetSampleRate);
+            buffer.copyToChannel(floatData, 0);
         }
-        
-        const buffer = audioCtx.createBuffer(1, floatData.length, targetSampleRate);
-        buffer.copyToChannel(floatData, 0);
         
         const source = audioCtx.createBufferSource();
         source.buffer = buffer;
@@ -387,7 +516,7 @@ async function startAudioRecording() {
 
        if (!recorderWorkletLoaded) {
            try {
-               await audioCtx.audioWorklet.addModule('/assets/js/recorder-processor.js');
+               await audioCtx.audioWorklet.addModule('/assets/js/recorder-processor.js' + cacheBust);
                recorderWorkletLoaded = true;
            } catch (e) {
                console.error('Failed to load Recorder worklet', e);
@@ -396,26 +525,31 @@ async function startAudioRecording() {
            }
        }
 
-       // Use AudioWorklet for raw PCM
+       // Use AudioWorklet for raw PCM/Float32
        recorderProcessor = new AudioWorkletNode(audioCtx, 'recorder-processor', {
            processorOptions: {
-               targetSampleRate: targetSampleRate
+               targetSampleRate: targetSampleRate,
+               outputFormat: effectiveCodec
            }
        });
 
        recorderProcessor.port.onmessage = (e) => {
            if (!isRecording || inputDisabled) return;
            const pcmBuffer = e.data;
-           
+            
            if (pcmBuffer.byteLength > 0) {
-               // Prepend Sequence Number (2 bytes)
-               const payload = new Uint8Array(2 + pcmBuffer.byteLength);
-               payload.set(new Uint8Array(pcmBuffer), 2); // Set data first
-               
-               const view = new DataView(payload.buffer);
-               // Sequence will be set only if we actually send
-               
-               let sent = false;
+                let raw = new Uint8Array(pcmBuffer);
+                if (currentCodec === 'ima_adpcm') {
+                    const pcm16 = new Int16Array(pcmBuffer);
+                    raw = encodeImaAdpcm(pcm16);
+                }
+                const payload = new Uint8Array(2 + raw.byteLength);
+                payload.set(raw, 2);
+                
+                const view = new DataView(payload.buffer);
+                // Sequence will be set only if we actually send
+                
+                let sent = false;
                if (audioWs && audioWs.readyState === WebSocket.OPEN) {
                    view.setUint16(0, sendSequence, true); // Little Endian
                    audioWs.send(payload.buffer);
@@ -483,7 +617,7 @@ async function setupInputPipeline() {
     if (noiseModeEl.value === 'smart' || noiseModeEl.value === 'smart_gain') {
         if (!noiseWorkletLoaded) {
             try {
-                await audioCtx.audioWorklet.addModule('/assets/js/rnnoise-processor.js');
+                await audioCtx.audioWorklet.addModule('/assets/js/rnnoise-processor.js' + cacheBust);
                 noiseWorkletLoaded = true;
             } catch (e) {
                 console.error('Failed to load RNNoise worklet', e);
@@ -527,7 +661,7 @@ async function setupInputPipeline() {
         try {
             // Fetch WASM if not cached
             if (!window.rnnoiseWasmBuffer) {
-                const resp = await fetch('/assets/js/rnnoise/rnnoise.wasm');
+                const resp = await fetch('/assets/js/rnnoise/rnnoise.wasm' + cacheBust);
                 if (resp.ok) {
                     window.rnnoiseWasmBuffer = await resp.arrayBuffer();
                 }
@@ -767,6 +901,7 @@ function connectWS() {
       if (msg.params) appendRoom(msg.params);
     } else if (msg.method === 'rooms.update') {
       renderRoomsTree(msg.params || {});
+      if (sid) updateRoomAudioSettingsById(sid);
     } else if (msg.method === 'room.update') {
       if (msg.params) {
         // Update cache so getUserName works
@@ -775,6 +910,7 @@ function connectWS() {
         else lastRoomsData.push(msg.params);
 
         if (msg.params.id === sid) renderMembers(msg.params);
+        if (msg.params.id === sid) updateRoomAudioSettingsById(sid);
         updateChatListNames();
       }
     } else if (msg.method === 'chat.public.history') {
@@ -916,6 +1052,7 @@ async function joinRoom(targetId) {
     }
 
     sid = targetId || sid || 'default';
+    updateRoomAudioSettingsById(sid);
     
     let displayName = sid;
     const r = lastRoomsData.find(x => x.id === sid);
@@ -1168,6 +1305,7 @@ function renderRoomsTree(data) {
       }});
 
       if (isAdmin()) {
+          menuItems.push({ text: '房间设置', action: () => openRoomSettingsModal(r) });
           menuItems.push({ text: r.permanent ? '取消永久' : '设为永久', action: async () => {
           try {
             const headers = await getAdminHeaders();
@@ -1307,6 +1445,32 @@ function renderRoomsTree(data) {
   updateChatListNames();
 }
 
+function openRoomSettingsModal(room) {
+  if (!isAdmin()) return;
+  const modal = document.getElementById('roomSettingsModal');
+  const backdrop = document.getElementById('modalBackdrop');
+  const codecSel = document.getElementById('roomCodec');
+  const qualSlider = document.getElementById('roomQuality');
+  const qualVal = document.getElementById('roomQualityVal');
+  const btnCancel = document.getElementById('roomSettingsCancel');
+  const btnSave = document.getElementById('roomSettingsSave');
+  codecSel.value = room.audioCodec || 'opus';
+  qualSlider.value = room.audioQuality || 6;
+  qualVal.textContent = qualSlider.value;
+  qualSlider.oninput = () => { qualVal.textContent = qualSlider.value; };
+  btnCancel.onclick = () => { modal.style.display = 'none'; backdrop.style.display = 'none'; };
+  btnSave.onclick = async () => {
+    try {
+      const auth = await getAdminAuthStr();
+      send({ method: 'admin.update_room', params: { auth, id: room.id, audioCodec: codecSel.value, audioQuality: parseInt(qualSlider.value, 10) } });
+      modal.style.display = 'none';
+      backdrop.style.display = 'none';
+      refreshRooms();
+    } catch {}
+  };
+  backdrop.style.display = 'block';
+  modal.style.display = 'block';
+}
 serverNameEl.addEventListener('contextmenu', (ev) => {
     ev.preventDefault();
     if (!isAdmin()) return; // Non-admin cannot create channels
@@ -1857,7 +2021,16 @@ sendChatBtn.onclick = () => {
   chatTextEl.value = '';
 };
 chatTextEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') sendChatBtn.click();
+  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    sendChatBtn.click();
+  }
+});
+chatTextEl.addEventListener('input', () => {
+  chatTextEl.style.height = 'auto';
+  const max = 140;
+  chatTextEl.style.height = Math.min(chatTextEl.scrollHeight, max) + 'px';
+  chatTextEl.style.overflowY = chatTextEl.scrollHeight > max ? 'auto' : 'hidden';
 });
 tabPublicBtn.onclick = () => {
   activeTab = 'public';
@@ -1960,17 +2133,41 @@ async function checkAdminSetup() {
 checkAdminSetup();
 
 connectWS();
-inputGainSlider.oninput = () => {
+function showSliderBubble(el, text) {
+  const rect = el.getBoundingClientRect();
+  const min = parseFloat(el.min || '0');
+  const max = parseFloat(el.max || '100');
+  const val = parseFloat(el.value || '0');
+  const ratio = Math.min(1, Math.max(0, (val - min) / (max - min)));
+  const x = rect.left + ratio * rect.width;
+  const y = rect.top;
+  const bubble = document.createElement('div');
+  bubble.style.position = 'fixed';
+  bubble.style.left = `${x}px`;
+  bubble.style.top = `${y - 24}px`;
+  bubble.style.transform = 'translateX(-50%)';
+  bubble.style.padding = '2px 6px';
+  bubble.style.fontSize = '12px';
+  bubble.style.background = 'var(--bg-secondary)';
+  bubble.style.border = '1px solid var(--border-color)';
+  bubble.style.borderRadius = '4px';
+  bubble.style.color = 'var(--text-primary)';
+  bubble.style.zIndex = '1000';
+  bubble.textContent = text;
+  document.body.appendChild(bubble);
+  setTimeout(() => { bubble.remove(); }, 800);
+}
+inputGainSlider.oninput = (e) => {
   if (inputGainNode) inputGainNode.gain.value = inputGainSlider.value / 100;
   LSW('ws.inputGain', inputGainSlider.value);
-  if (inputGainVal) inputGainVal.textContent = inputGainSlider.value + '%';
   updateSliderFill(inputGainSlider);
+  showSliderBubble(inputGainSlider, inputGainSlider.value + '%');
 };
-masterVolSlider.oninput = () => {
+masterVolSlider.oninput = (e) => {
   if (masterGainNode) masterGainNode.gain.value = masterVolSlider.value / 100;
   LSW('ws.masterVol', masterVolSlider.value);
-  if (masterVolVal) masterVolVal.textContent = masterVolSlider.value + '%';
   updateSliderFill(masterVolSlider);
+  showSliderBubble(masterVolSlider, masterVolSlider.value + '%');
 };
 
 // Initialize slider fills
@@ -2000,6 +2197,73 @@ floatAudioEl.addEventListener('mouseenter', openFloat);
 floatAudioEl.addEventListener('mouseleave', scheduleCloseFloat);
 floatMenuEl.addEventListener('mouseenter', openFloat);
 floatMenuEl.addEventListener('mouseleave', scheduleCloseFloat);
+
+// Draggable Float Button with Edge Docking
+const FLOAT_POS_KEY = 'ws.floatAudioPos';
+function clamp(n, min, max) { return n < min ? min : (n > max ? max : n); }
+function applyFloatPos(pos) {
+  const dock = pos && pos.dock === 'left' ? 'dock-left' : 'dock-right';
+  floatAudioEl.classList.remove('dock-left', 'dock-right');
+  floatAudioEl.classList.add(dock);
+  const vh = window.innerHeight;
+  const top = clamp((pos && Number.isFinite(pos.top) ? pos.top : vh - 100), 20, vh - 100);
+  floatAudioEl.style.top = top + 'px';
+  floatAudioEl.style.bottom = 'auto';
+  floatAudioEl.style.left = '';
+  floatAudioEl.style.right = '';
+}
+applyFloatPos(JSON.parse(localStorage.getItem(FLOAT_POS_KEY) || '{}'));
+
+let dragState = null;
+let dragRAF = 0;
+let dragTarget = { left: 0, top: 0 };
+function onDragStart(e) {
+  const rect = floatAudioEl.getBoundingClientRect();
+  const startX = (e.touches ? e.touches[0].clientX : e.clientX);
+  const startY = (e.touches ? e.touches[0].clientY : e.clientY);
+  dragState = {
+    startX, startY,
+    startLeft: rect.left,
+    startTop: rect.top
+  };
+  floatAudioEl.classList.add('dragging');
+  document.addEventListener('mousemove', onDragMove);
+  document.addEventListener('touchmove', onDragMove, { passive: false });
+  document.addEventListener('mouseup', onDragEnd, { once: true });
+  document.addEventListener('touchend', onDragEnd, { once: true });
+}
+function onDragMove(e) {
+  if (!dragState) return;
+  if (e.cancelable) e.preventDefault();
+  const x = (e.touches ? e.touches[0].clientX : e.clientX);
+  const y = (e.touches ? e.touches[0].clientY : e.clientY);
+  const dx = x - dragState.startX;
+  const dy = y - dragState.startY;
+  const W = window.innerWidth, H = window.innerHeight;
+  dragTarget.left = clamp(dragState.startLeft + dx, 10, W - 70);
+  dragTarget.top = clamp(dragState.startTop + dy, 10, H - 90);
+  if (!dragRAF) {
+    dragRAF = requestAnimationFrame(() => {
+      floatAudioEl.style.left = dragTarget.left + 'px';
+      floatAudioEl.style.top = dragTarget.top + 'px';
+      dragRAF = 0;
+    });
+  }
+  floatAudioEl.classList.remove('open');
+}
+function onDragEnd() {
+  document.removeEventListener('mousemove', onDragMove);
+  document.removeEventListener('touchmove', onDragMove);
+  const rect = floatAudioEl.getBoundingClientRect();
+  const dock = rect.left < (window.innerWidth / 2) ? 'left' : 'right';
+  const pos = { dock, top: rect.top };
+  localStorage.setItem(FLOAT_POS_KEY, JSON.stringify(pos));
+  applyFloatPos(pos);
+  dragState = null;
+  floatAudioEl.classList.remove('dragging');
+}
+floatBtn.addEventListener('mousedown', onDragStart);
+floatBtn.addEventListener('touchstart', onDragStart, { passive: true });
 
 const speakingHoldMap = new Map();
 

@@ -44,8 +44,8 @@
         </div>
         <div id="chatList" class="list"></div>
         <div class="row">
-          <input id="chatText" placeholder="输入消息..." />
-          <button id="sendChat">发送</button>
+          <textarea id="chatText" class="chat-input" placeholder="输入消息，Enter发送，Shift+Enter换行"></textarea>
+          <button id="sendChat" class="chat-send">发送</button>
         </div>
       </section>
       </section>
@@ -68,8 +68,30 @@
         </div>
       </div>
     </div>
-  </div>
-  <div id="modalBackdrop" class="modal-backdrop"></div>
+    <div id="roomSettingsModal" class="modal" style="display:none;">
+      <div class="modal-content" style="width:420px;">
+        <h3>房间设置</h3>
+        <div class="row">
+          <label style="width:120px;">音频编码</label>
+          <select id="roomCodec" style="flex:1;">
+            <option value="opus">Opus</option>
+            <option value="pcm16">PCM16</option>
+            <option value="pcmf32">PCM Float32</option>
+            <option value="ima_adpcm">IMA-ADPCM</option>
+          </select>
+        </div>
+        <div class="row">
+          <label style="width:120px;">音频质量</label>
+          <input id="roomQuality" type="range" min="1" max="10" value="6" style="flex:1;">
+          <span id="roomQualityVal" style="width:40px;text-align:right;">6</span>
+        </div>
+        <div class="row">
+          <button id="roomSettingsCancel" class="secondary">取消</button>
+          <button id="roomSettingsSave">保存</button>
+        </div>
+      </div>
+    </div>
+    <div id="modalBackdrop" class="modal-backdrop"></div>
   <div id="calibrationModal" class="modal">
     <header>自动设置阈值</header>
     <div style="padding:15px;text-align:center;">
@@ -106,7 +128,14 @@
       <button id="groupConfirm">确定</button>
     </div>
   </div>
-  <script src="/assets/js/app.js" defer></script>
+  <script>
+    (function(){
+      var s=document.createElement('script');
+      s.src='/assets/js/app.js?v='+Date.now();
+      s.async=true;
+      document.body.appendChild(s);
+    })();
+  </script>
   
 </body>
 </html>
