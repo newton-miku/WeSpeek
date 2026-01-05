@@ -22,6 +22,13 @@ const connStatus = document.getElementById('connStatus');
 let sendSequence = 0;
 let clientAudioStats = {}; // { uid: { expectedSeq, lost, received, late } }
 
+// Reconnect State
+let wsReconnectTimer = null;
+let wsReconnectAttempts = 0;
+let audioWsReconnectTimer = null;
+let audioWsReconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 30000;
+
 const chatListEl = document.getElementById('chatList');
 const chatTextEl = document.getElementById('chatText');
 const sendChatBtn = document.getElementById('sendChat');
@@ -713,11 +720,18 @@ function handleWsAudio(data) {
 
 function connectAudioWS() {
   if (audioWs) {
+    audioWs.onclose = null; // Prevent reconnect trigger during manual close/reconnect
     try { audioWs.close(); } catch {}
   }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   audioWs = new WebSocket(`${proto}://${location.host}/ws/audio?uid=${encodeURIComponent(myUid)}&sid=${encodeURIComponent(sid)}`);
   audioWs.binaryType = 'arraybuffer';
+  
+  audioWs.onopen = () => {
+     audioWsReconnectAttempts = 0;
+     if (audioWsReconnectTimer) { clearTimeout(audioWsReconnectTimer); audioWsReconnectTimer = null; }
+  };
+
   audioWs.onmessage = ev => {
     if (ev.data instanceof ArrayBuffer) {
       handleWsAudio(ev.data);
@@ -725,6 +739,15 @@ function connectAudioWS() {
   };
   audioWs.onclose = (ev) => {
     console.log('Audio WS closed:', ev.code, ev.reason);
+    // If signal is open and we are in a room, reconnect audio
+    if (ws && ws.readyState === WebSocket.OPEN && sid) {
+        const delay = Math.min(1000 * Math.pow(2, audioWsReconnectAttempts), MAX_RECONNECT_DELAY);
+        console.log(`Audio WS Reconnecting in ${delay}ms...`);
+        audioWsReconnectTimer = setTimeout(() => {
+            audioWsReconnectAttempts++;
+            connectAudioWS();
+        }, delay);
+    }
   };
 }
 
@@ -921,8 +944,17 @@ async function joinRoom(targetId) {
 
 leaveBtn.onclick = async () => {
   leaveBtn.disabled = true;
+  
+  // Cancel reconnects
+  if (audioWsReconnectTimer) { clearTimeout(audioWsReconnectTimer); audioWsReconnectTimer = null; }
+  audioWsReconnectAttempts = 0;
+
   try { send({ method: 'leave' }); } catch {}
-  if (audioWs) { try { audioWs.close(); } catch {} audioWs = null; }
+  if (audioWs) { 
+      audioWs.onclose = null; 
+      try { audioWs.close(); } catch {} 
+      audioWs = null; 
+  }
   playNotification('leave');
   stopAudioRecording();
   try { localStream && localStream.getTracks().forEach(t => t.stop()); } catch {}
@@ -1931,11 +1963,13 @@ connectWS();
 inputGainSlider.oninput = () => {
   if (inputGainNode) inputGainNode.gain.value = inputGainSlider.value / 100;
   LSW('ws.inputGain', inputGainSlider.value);
+  if (inputGainVal) inputGainVal.textContent = inputGainSlider.value + '%';
   updateSliderFill(inputGainSlider);
 };
 masterVolSlider.oninput = () => {
   if (masterGainNode) masterGainNode.gain.value = masterVolSlider.value / 100;
   LSW('ws.masterVol', masterVolSlider.value);
+  if (masterVolVal) masterVolVal.textContent = masterVolSlider.value + '%';
   updateSliderFill(masterVolSlider);
 };
 
