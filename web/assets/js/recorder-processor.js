@@ -31,27 +31,40 @@ class RecorderProcessor extends AudioWorkletProcessor {
         const inputData = this.buffer;
         const currentSampleRate = sampleRate;
         const ratio = currentSampleRate / this.targetSampleRate;
-        const newLength = Math.floor(inputData.length / ratio);
-        const pcmData = new Int16Array(newLength);
+        const outLength = Math.floor(inputData.length / ratio);
+        const pcmData = new Int16Array(outLength);
         let sumSq = 0;
 
-        for (let i = 0; i < newLength; i++) {
-            const offset = Math.floor(i * ratio);
-            let s = Math.max(-1, Math.min(1, inputData[offset]));
+        // Linear interpolation resampling to reduce aliasing
+        for (let i = 0; i < outLength; i++) {
+            const pos = i * ratio;
+            const idx = Math.floor(pos);
+            const frac = pos - idx;
+
+            const s0 = inputData[idx] || 0.0;
+            const s1 = inputData[idx + 1] || s0;
+            let s = s0 + (s1 - s0) * frac;
+
+            // Clip to [-1,1]
+            if (s > 1.0) s = 1.0;
+            if (s < -1.0) s = -1.0;
+
             const val = s < 0 ? s * 0x8000 : s * 0x7FFF;
             pcmData[i] = val;
-            
-            // Calculate RMS on the fly
-            // Use normalized float s for calculation
             sumSq += s * s;
         }
 
-        const rms = Math.sqrt(sumSq / newLength);
+        const rms = Math.sqrt(sumSq / outLength);
 
-        // Silence detection (Noise Gate)
+        // Silence detection (Noise Gate) with Hold mechanism
         // Client uses 0.02 RMS. We use the same here.
-        // This acts as a hard gate at the lowest level.
+        // Added hold time to prevent rapid cutting (chattering) between words.
         if (rms > 0.02) { 
+            this.gateHold = 10; // Hold for ~10 buffers (approx 400ms)
+        }
+        
+        if (this.gateHold > 0) {
+            this.gateHold--;
             this.port.postMessage(pcmData.buffer, [pcmData.buffer]);
         }
         
