@@ -323,6 +323,11 @@ let targetSampleRate = 16000;
 let currentCodec = 'opus';
 let currentQuality = 6;
 let effectiveCodec = 'pcm16';
+let opusEncoder = null;
+const opusDecoders = new Map();
+let opusEncBuffer = [];
+let opusEncTimestamp = 0;
+const opusRxTimestamp = {};
 const adpcmEncState = { predictor: 0, index: 0 };
 const adpcmDecState = new Map();
 
@@ -426,9 +431,55 @@ function updateRoomAudioSettingsById(roomId) {
   const r = (lastRoomsData || []).find(x => x.id === roomId);
   if (!r) return;
   currentCodec = r.audioCodec || 'opus';
+  if (currentCodec === 'opus') {
+    if (!('AudioEncoder' in window) || !('AudioDecoder' in window)) {
+      currentCodec = 'pcm16';
+    }
+  }
   currentQuality = r.audioQuality || 6;
   targetSampleRate = mapQualityToSampleRate(currentQuality);
-  effectiveCodec = (currentCodec === 'pcmf32' ? 'pcmf32' : 'pcm16');
+  effectiveCodec = ((currentCodec === 'pcmf32' || currentCodec === 'opus') ? 'pcmf32' : 'pcm16');
+  if (currentCodec === 'opus') {
+    try {
+      if (opusEncoder) { try { opusEncoder.close(); } catch {} }
+      opusEncoder = new AudioEncoder({
+        output: (chunk) => {
+          const raw = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(raw);
+          const payload = new Uint8Array(2 + raw.byteLength);
+          payload.set(raw, 2);
+          const view = new DataView(payload.buffer);
+          let sent = false;
+          if (audioWs && audioWs.readyState === WebSocket.OPEN) {
+            view.setUint16(0, sendSequence, true);
+            audioWs.send(payload.buffer);
+            sent = true;
+          } else if (ws && ws.readyState === WebSocket.OPEN) {
+            view.setUint16(0, sendSequence, true);
+            ws.send(payload.buffer);
+            sent = true;
+          }
+          if (sent) {
+            sendSequence = (sendSequence + 1) % 65536;
+          }
+        },
+        error: (e) => console.error(e)
+      });
+      opusEncoder.configure({ codec: 'opus', sampleRate: targetSampleRate, numberOfChannels: 1 });
+      opusEncBuffer = [];
+      opusEncTimestamp = 0;
+    } catch (e) {
+      console.error(e);
+      try { opusEncoder && opusEncoder.close(); } catch {}
+      opusEncoder = null;
+      currentCodec = 'pcm16';
+      effectiveCodec = 'pcm16';
+    }
+  } else {
+    try { opusEncoder && opusEncoder.close(); } catch {}
+    opusEncoder = null;
+    opusEncBuffer = [];
+  }
   if (recorderProcessor) {
     stopAudioRecording();
     startAudioRecording();
@@ -439,7 +490,60 @@ function playAudioChunk(uid, arrayBuffer) {
     try {
         if (audioCtx.state === 'suspended') audioCtx.resume();
         let buffer;
-        if (currentCodec === 'ima_adpcm') {
+        if (currentCodec === 'opus') {
+            let dec = opusDecoders.get(uid);
+            if (!dec) {
+                try {
+                    dec = new AudioDecoder({
+                        output: (audioData) => {
+                            try {
+                                const frames = audioData.numberOfFrames;
+                                const plane = new Float32Array(frames);
+                                audioData.copyTo(plane, { planeIndex: 0 });
+                                audioData.close();
+                                const buf = audioCtx.createBuffer(1, plane.length, targetSampleRate);
+                                buf.copyToChannel(plane, 0);
+                                const source = audioCtx.createBufferSource();
+                                source.buffer = buf;
+                                const { analyser } = getOrCreateUserAudioNodes(uid);
+                                source.connect(analyser);
+                                let start = nextStartTime[uid] || 0;
+                                const now = audioCtx.currentTime;
+                                if (start < now) {
+                                    start = now + 0.04;
+                                } else if (start > now + 2.0) {
+                                    start = now + 0.04;
+                                }
+                                source.start(start);
+                                nextStartTime[uid] = start + buf.duration;
+                                const chip = uidElementMap.get(uid);
+                                if (chip) {
+                                    chip.classList.add('speaking');
+                                    if (chip.speakTimeout) clearTimeout(chip.speakTimeout);
+                                    chip.speakTimeout = setTimeout(() => chip.classList.remove('speaking'), 150);
+                                }
+                            } catch (e) {
+                                console.warn(e);
+                            }
+                        },
+                        error: (e) => console.error(e)
+                    });
+                    dec.configure({ codec: 'opus', sampleRate: targetSampleRate, numberOfChannels: 1 });
+                    opusDecoders.set(uid, dec);
+                } catch (e) {
+                    console.error(e);
+                    return;
+                }
+            }
+            const data = new Uint8Array(arrayBuffer);
+            const ts = opusRxTimestamp[uid] || 0;
+            const chunk = new EncodedAudioChunk({ type: 'key', timestamp: ts, data });
+            dec.decode(chunk);
+            const frameSamples = Math.floor(targetSampleRate * 0.02);
+            const stepUs = Math.floor(1000000 * frameSamples / targetSampleRate);
+            opusRxTimestamp[uid] = ts + stepUs;
+            return;
+        } else if (currentCodec === 'ima_adpcm') {
             const adpcm = new Uint8Array(arrayBuffer);
             const pcm16 = decodeImaAdpcm(uid, adpcm);
             const floatData = new Float32Array(pcm16.length);
@@ -538,30 +642,53 @@ async function startAudioRecording() {
            const pcmBuffer = e.data;
             
            if (pcmBuffer.byteLength > 0) {
-                let raw = new Uint8Array(pcmBuffer);
-                if (currentCodec === 'ima_adpcm') {
-                    const pcm16 = new Int16Array(pcmBuffer);
-                    raw = encodeImaAdpcm(pcm16);
-                }
-                const payload = new Uint8Array(2 + raw.byteLength);
-                payload.set(raw, 2);
-                
-                const view = new DataView(payload.buffer);
-                // Sequence will be set only if we actually send
-                
-                let sent = false;
-               if (audioWs && audioWs.readyState === WebSocket.OPEN) {
-                   view.setUint16(0, sendSequence, true); // Little Endian
-                   audioWs.send(payload.buffer);
-                   sent = true;
-               } else if (ws && ws.readyState === WebSocket.OPEN) {
-                   view.setUint16(0, sendSequence, true); // Little Endian
-                   ws.send(payload.buffer);
-                   sent = true;
-               }
-
-               if (sent) {
-                   sendSequence = (sendSequence + 1) % 65536;
+               if (currentCodec === 'opus' && opusEncoder) {
+                   const f32 = new Float32Array(pcmBuffer);
+                   for (let i = 0; i < f32.length; i++) opusEncBuffer.push(f32[i]);
+                   const frameSamples = Math.floor(targetSampleRate * 0.02);
+                   const stepUs = Math.floor(1000000 * frameSamples / targetSampleRate);
+                   while (opusEncBuffer.length >= frameSamples) {
+                       const frame = new Float32Array(frameSamples);
+                       for (let i = 0; i < frameSamples; i++) frame[i] = opusEncBuffer[i];
+                       opusEncBuffer = opusEncBuffer.slice(frameSamples);
+                       try {
+                           const ad = new AudioData({
+                               format: 'f32',
+                               sampleRate: targetSampleRate,
+                               numberOfFrames: frameSamples,
+                               numberOfChannels: 1,
+                               timestamp: opusEncTimestamp,
+                               data: frame.buffer
+                           });
+                           opusEncoder.encode(ad);
+                           ad.close();
+                           opusEncTimestamp += stepUs;
+                       } catch (err) {
+                           console.error(err);
+                       }
+                   }
+               } else {
+                   let raw = new Uint8Array(pcmBuffer);
+                   if (currentCodec === 'ima_adpcm') {
+                       const pcm16 = new Int16Array(pcmBuffer);
+                       raw = encodeImaAdpcm(pcm16);
+                   }
+                   const payload = new Uint8Array(2 + raw.byteLength);
+                   payload.set(raw, 2);
+                   const view = new DataView(payload.buffer);
+                   let sent = false;
+                   if (audioWs && audioWs.readyState === WebSocket.OPEN) {
+                       view.setUint16(0, sendSequence, true);
+                       audioWs.send(payload.buffer);
+                       sent = true;
+                   } else if (ws && ws.readyState === WebSocket.OPEN) {
+                       view.setUint16(0, sendSequence, true);
+                       ws.send(payload.buffer);
+                       sent = true;
+                   }
+                   if (sent) {
+                       sendSequence = (sendSequence + 1) % 65536;
+                   }
                }
            }
        };
@@ -2206,13 +2333,22 @@ function applyFloatPos(pos) {
   floatAudioEl.classList.remove('dock-left', 'dock-right');
   floatAudioEl.classList.add(dock);
   const vh = window.innerHeight;
-  const top = clamp((pos && Number.isFinite(pos.top) ? pos.top : vh - 100), 20, vh - 100);
+  const maxTop = Math.max(20, vh - 100);
+  const top = clamp((pos && Number.isFinite(pos.top) ? pos.top : maxTop), 20, maxTop);
   floatAudioEl.style.top = top + 'px';
   floatAudioEl.style.bottom = 'auto';
   floatAudioEl.style.left = '';
   floatAudioEl.style.right = '';
 }
 applyFloatPos(JSON.parse(localStorage.getItem(FLOAT_POS_KEY) || '{}'));
+
+let resizeRAF;
+window.addEventListener('resize', () => {
+  if (resizeRAF) cancelAnimationFrame(resizeRAF);
+  resizeRAF = requestAnimationFrame(() => {
+    applyFloatPos(JSON.parse(localStorage.getItem(FLOAT_POS_KEY) || '{}'));
+  });
+});
 
 let dragState = null;
 let dragRAF = 0;
