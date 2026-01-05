@@ -23,9 +23,6 @@ FROM alpine:latest
 
 WORKDIR /app
 
-# Create a non-root user for security
-RUN adduser -D -g '' wespeek
-
 # Copy binary from builder
 COPY --from=builder /app/wespeek .
 
@@ -33,11 +30,7 @@ COPY --from=builder /app/wespeek .
 COPY web ./web
 
 # Create a directory for the database and set permissions
-RUN mkdir -p /data && \
-    chown -R wespeek:wespeek /app /data
-
-# Switch to non-root user
-USER wespeek
+RUN mkdir -p /data
 
 # Expose the default port
 EXPOSE 7000

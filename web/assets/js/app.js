@@ -925,7 +925,17 @@ function connectAudioWS() {
   };
 }
 
+let lastJoinedRoom = '';
+
 function connectWS() {
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if (ws) {
+      ws.onclose = null;
+      ws.onmessage = null;
+      ws.onopen = null;
+      try { ws.close(); } catch {}
+  }
+
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.binaryType = 'arraybuffer';
@@ -1002,16 +1012,24 @@ function connectWS() {
     }
   };
   ws.onopen = () => {
+    wsReconnectAttempts = 0;
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
     connStatus.textContent = '信令已连接';
     connStatus.className = 'status ok';
     loadPublicHistory();
     // send({ method: 'latency.subscribe' }); // Moved to on-demand in showUserDetails
     
-    // Auto-join room from URL
-    const params = new URLSearchParams(window.location.search);
-    const room = params.get('room');
-    if (room && !connected) {
-        joinRoom(room);
+    // Auto-join room logic
+    if (lastJoinedRoom && !connected) {
+        console.log('Restoring connection to room:', lastJoinedRoom);
+        joinRoom(lastJoinedRoom);
+        lastJoinedRoom = '';
+    } else {
+        const params = new URLSearchParams(window.location.search);
+        const room = params.get('room');
+        if (room && !connected) {
+            joinRoom(room);
+        }
     }
   };
   ws.onclose = () => {
@@ -1019,6 +1037,25 @@ function connectWS() {
     connStatus.className = 'status warn';
     connected = false;
     updateHeaderIcons();
+    
+    // Save state before clearing
+    if (sid) lastJoinedRoom = sid;
+
+    // Clear lists and room state
+    roomsTree.innerHTML = '';
+    membersEl.innerHTML = '';
+    curRoomEl.textContent = '未连接';
+    tabRoomBtn.textContent = '房间';
+    sid = '';
+    lastRoomsData = [];
+    
+    // Reconnect
+    const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts), MAX_RECONNECT_DELAY);
+    console.log(`WS Reconnecting in ${delay}ms...`);
+    wsReconnectTimer = setTimeout(() => {
+        wsReconnectAttempts++;
+        connectWS();
+    }, delay);
   };
 }
 
