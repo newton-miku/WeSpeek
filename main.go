@@ -28,7 +28,8 @@ func main() {
 	// Initialize FileStore (currently local)
 	// Can be extended to support S3/MinIO based on config
 	// Store in data/uploads instead of web/uploads for better Docker compatibility
-	fileStore := local.NewFileStore("data/uploads/img", "/uploads/img")
+	uploadDir := util.EnvOr("WSPEEK_UPLOAD_DIR", "data/uploads")
+	fileStore := local.NewFileStore(uploadDir+"/img", "/uploads/img")
 
 	srv := server.New(st, fileStore)
 
@@ -65,7 +66,16 @@ func main() {
 	mux.HandleFunc("/api/groups/", apiHandler.GroupsHandler)
 
 	// Serve uploaded files
-	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("data/uploads"))))
+	// Note: We strip prefix "/uploads/" and serve from the upload directory's parent (since we used uploadDir/img)
+	// Wait, local.NewFileStore("data/uploads/img", "/uploads/img") means files are at data/uploads/img/xxx.jpg
+	// and URL is /uploads/img/xxx.jpg
+	// So http.StripPrefix("/uploads/", http.FileServer(http.Dir("data/uploads"))) works because:
+	// Request: /uploads/img/xxx.jpg -> Strip -> img/xxx.jpg -> Serve from data/uploads -> data/uploads/img/xxx.jpg. Correct.
+
+	// With dynamic uploadDir:
+	// If uploadDir="data/uploads", then NewFileStore uses "data/uploads/img".
+	// We should serve "data/uploads" at "/uploads/".
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(uploadDir))))
 
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
