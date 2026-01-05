@@ -32,15 +32,16 @@ type Server struct {
 	AllowUploads       bool
 }
 
-func New(s store.Store, fs repository.FileStore) *Server {
-	ms := service.NewMediaService(fs, true)
+func New(s store.Store, fs repository.FileStore, storeImagesAsFiles bool, allowUploads bool) *Server {
+	ms := service.NewMediaService(fs, allowUploads)
 	return &Server{
-		roomService:  service.NewRoomService(s, s),
-		chatService:  service.NewChatService(s, ms),
-		adminService: service.NewAdminService(s),
-		mediaService: ms,
-		fileStore:    fs,
-		AllowUploads: true, // Default allow
+		roomService:        service.NewRoomService(s, s),
+		chatService:        service.NewChatService(s, ms),
+		adminService:       service.NewAdminService(s),
+		mediaService:       ms,
+		fileStore:          fs,
+		StoreImagesAsFiles: storeImagesAsFiles,
+		AllowUploads:       allowUploads, // Default allow
 	}
 }
 

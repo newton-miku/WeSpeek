@@ -31,7 +31,7 @@ func main() {
 	uploadDir := util.EnvOr("WSPEEK_UPLOAD_DIR", "data/uploads")
 	fileStore := local.NewFileStore(uploadDir+"/img", "/uploads/img")
 
-	srv := server.New(st, fileStore)
+	srv := server.New(st, fileStore, true, true)
 
 	// Configure server behavior from environment
 	if val := os.Getenv("WSPEEK_STORE_IMAGES"); val != "" {
@@ -42,6 +42,8 @@ func main() {
 
 	if val := os.Getenv("WSPEEK_ALLOW_UPLOAD"); val != "" {
 		srv.AllowUploads = val == "true"
+	} else {
+		srv.AllowUploads = true // Default to true
 	}
 
 	if err := srv.Init(); err != nil {
