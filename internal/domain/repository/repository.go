@@ -24,9 +24,16 @@ type GroupRepository interface {
 }
 
 type ChatRepository interface {
-	SaveChatMessage(msg entity.ChatMessage) error
+	SaveChatMessage(msg entity.ChatMessage) (int64, error)
+	GetChatMessage(id int64) (entity.ChatMessage, error)
 	GetChatHistory(roomID string, limit int) ([]entity.ChatMessage, error)
+	GetOldChatMessages(retentionDays int) ([]entity.ChatMessage, error)
 	DeleteOldChatMessages(retentionDays int) error
+	DeleteChatMessage(id int64) error
+
+	// File reference counting
+	IncFileRef(path string) error
+	DecFileRef(path string) (int64, error)
 }
 
 type AdminRepository interface {

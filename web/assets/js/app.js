@@ -32,6 +32,8 @@ const MAX_RECONNECT_DELAY = 30000;
 const chatListEl = document.getElementById('chatList');
 const chatTextEl = document.getElementById('chatText');
 const sendChatBtn = document.getElementById('sendChat');
+const chatImgBtn = document.getElementById('chatImgBtn');
+const chatImgInput = document.getElementById('chatImgInput');
 const tabPublicBtn = document.getElementById('tabPublic');
 const tabRoomBtn = document.getElementById('tabRoom');
 const getAdminToken = () => localStorage.getItem('wspeek_admin_token') || '';
@@ -115,6 +117,7 @@ let publicMsgs = [];
 let roomMsgs = [];
 let connected = false;
 let joinLock = false;
+let allowUploads = true;
 let drawLevelReq;
 const wsAudioSources = new Map(); // uid -> { nextStartTime, audioQueue, isPlaying }
 const LS = (k) => localStorage.getItem(k);
@@ -328,87 +331,6 @@ const opusDecoders = new Map();
 let opusEncBuffer = [];
 let opusEncTimestamp = 0;
 const opusRxTimestamp = {};
-const adpcmEncState = { predictor: 0, index: 0 };
-const adpcmDecState = new Map();
-
-const IMA_INDEX_TABLE = new Int8Array([ -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8 ]);
-const IMA_STEP_TABLE = new Int16Array([
-  7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28,
-  31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107,
-  118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337,
-  371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963, 1060,
-  1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749,
-  3024, 3327, 3660, 4026, 4428, 4871, 5367, 5919, 6535, 7223,
-  7985, 8827, 9752, 10767, 11877, 13086, 14404, 15837, 17388,
-  19071, 20899, 22886, 25054, 27409, 29967, 32767
-]);
-
-function clamp(n, min, max) { return n < min ? min : (n > max ? max : n); }
-
-function encodeImaAdpcm(int16) {
-  let pred = adpcmEncState.predictor|0;
-  let idx = adpcmEncState.index|0;
-  const out = new Uint8Array(Math.ceil(int16.length / 2));
-  let oi = 0;
-  for (let i = 0; i < int16.length; i += 2) {
-    let b0 = 0, b1 = 0;
-    for (let k = 0; k < 2 && (i + k) < int16.length; k++) {
-      let sample = int16[i + k];
-      let step = IMA_STEP_TABLE[idx];
-      let diff = sample - pred;
-      let code = 0;
-      if (diff < 0) { code = 8; diff = -diff; }
-      let mask = [4,2,1];
-      let vpdiff = step >> 3;
-      for (let j = 0; j < 3; j++) {
-        if (diff > step) { code |= mask[j]; diff -= step; vpdiff += step; }
-        step >>= 1;
-      }
-      if (code & 8) pred -= vpdiff; else pred += vpdiff;
-      pred = clamp(pred, -32768, 32767);
-      idx += IMA_INDEX_TABLE[code];
-      idx = clamp(idx, 0, 88);
-      if (k === 0) b0 = code; else b1 = code;
-    }
-    out[oi++] = (b1 << 4) | (b0 & 0xF);
-  }
-  adpcmEncState.predictor = pred;
-  adpcmEncState.index = idx;
-  return out;
-}
-
-function getOrInitDecState(uid) {
-  let st = adpcmDecState.get(uid);
-  if (!st) { st = { predictor: 0, index: 0 }; adpcmDecState.set(uid, st); }
-  return st;
-}
-
-function decodeImaAdpcm(uid, bytes) {
-  const st = getOrInitDecState(uid);
-  let pred = st.predictor|0;
-  let idx = st.index|0;
-  const out = new Int16Array(bytes.length * 2);
-  let oi = 0;
-  for (let i = 0; i < bytes.length; i++) {
-    const v = bytes[i];
-    for (let s = 0; s < 2; s++) {
-      const code = s === 0 ? (v & 0xF) : (v >> 4);
-      let step = IMA_STEP_TABLE[idx];
-      let vpdiff = step >> 3;
-      if (code & 4) vpdiff += step;
-      if (code & 2) vpdiff += (step >> 1);
-      if (code & 1) vpdiff += (step >> 2);
-      if (code & 8) pred -= vpdiff; else pred += vpdiff;
-      pred = clamp(pred, -32768, 32767);
-      idx += IMA_INDEX_TABLE[code];
-      idx = clamp(idx, 0, 88);
-      out[oi++] = pred;
-    }
-  }
-  st.predictor = pred;
-  st.index = idx;
-  return out;
-}
 
 function mapQualityToSampleRate(q) {
   const n = Math.max(1, Math.min(10, parseInt(q || 6, 10)));
@@ -548,16 +470,6 @@ function playAudioChunk(uid, arrayBuffer) {
             const stepUs = Math.floor(1000000 * frameSamples / targetSampleRate);
             opusRxTimestamp[uid] = ts + stepUs;
             return;
-        } else if (currentCodec === 'ima_adpcm') {
-            const adpcm = new Uint8Array(arrayBuffer);
-            const pcm16 = decodeImaAdpcm(uid, adpcm);
-            const floatData = new Float32Array(pcm16.length);
-            for (let i = 0; i < pcm16.length; i++) {
-                const int = pcm16[i];
-                floatData[i] = int < 0 ? int / 0x8000 : int / 0x7FFF;
-            }
-            buffer = audioCtx.createBuffer(1, floatData.length, targetSampleRate);
-            buffer.copyToChannel(floatData, 0);
         } else if (effectiveCodec === 'pcmf32') {
             const floatData = new Float32Array(arrayBuffer);
             buffer = audioCtx.createBuffer(1, floatData.length, targetSampleRate);
@@ -674,10 +586,6 @@ async function startAudioRecording() {
                    }
                } else {
                    let raw = new Uint8Array(pcmBuffer);
-                   if (currentCodec === 'ima_adpcm') {
-                       const pcm16 = new Int16Array(pcmBuffer);
-                       raw = encodeImaAdpcm(pcm16);
-                   }
                    const payload = new Uint8Array(2 + raw.byteLength);
                    payload.set(raw, 2);
                    const view = new DataView(payload.buffer);
@@ -1052,6 +960,13 @@ function connectWS() {
       roomMsgs = (msg.params || []);
       renderChatList();
       if (connected) connectAudioWS();
+    } else if (msg.method === 'chat.revoke') {
+      if (msg.params && msg.params.msgId) {
+        const id = msg.params.msgId;
+        publicMsgs = publicMsgs.filter(m => m.id !== id);
+        roomMsgs = roomMsgs.filter(m => m.id !== id);
+        renderChatList();
+      }
     } else if (msg.method === 'room.move') {
       if (msg.params && msg.params.target) {
         playNotification('move');
@@ -1064,6 +979,11 @@ function connectWS() {
       }
       if (window.onUserInfoUpdate) {
         window.onUserInfoUpdate(msg.params);
+      }
+    } else if (msg.method === 'server.config') {
+      if (msg.params) {
+        allowUploads = msg.params.allowUploads;
+        updateUploadUI();
       }
     } else if (msg.method === 'latency.update') {
       if (msg.params) {
@@ -2063,28 +1983,99 @@ function updateChatListNames() {
   });
 }
 
+function createChatLine(msg) {
+  const ts = formatChatTime(msg.time);
+  const line = document.createElement('div');
+  line.className = 'chat-line';
+
+  // Revoke Button
+  const now = Math.floor(Date.now() / 1000);
+  const canRevoke = (msg.uid === myUid && (now - msg.time) <= 120) || getAdminToken();
+
+  const tsEl = document.createElement('span');
+  tsEl.className = 'chat-ts';
+  tsEl.textContent = `[${ts}] `;
+  const userEl = document.createElement('span');
+  userEl.className = 'chat-user';
+  userEl.dataset.uid = msg.uid;
+  userEl.dataset.fallback = msg.name || '';
+  const currentName = getUserName(msg.uid, msg.name);
+  userEl.textContent = `${currentName}: `;
+  const textEl = document.createElement('span');
+  textEl.className = 'chat-text';
+  if (msg.text && (msg.text.startsWith('data:image/') || msg.text.startsWith('image:'))) {
+    const img = document.createElement('img');
+    img.src = msg.text.startsWith('image:') ? msg.text.substring(6) : msg.text;
+    img.className = 'chat-img';
+    img.onclick = () => {
+      const win = window.open();
+      if (win) win.document.write('<img src="' + img.src + '" style="max-width:100%"/>');
+    };
+    textEl.appendChild(img);
+  } else {
+    textEl.textContent = msg.text;
+  }
+
+  textEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const items = [];
+
+    // Copy option
+    items.push({
+      text: '复制',
+      action: () => {
+        if (msg.text && !msg.text.startsWith('data:image/') && !msg.text.startsWith('image:')) {
+          navigator.clipboard.writeText(msg.text).catch(console.error);
+        } else {
+          // For images, we could copy the base64 or notify user
+          // Currently just trying to copy text content if possible
+           navigator.clipboard.writeText(msg.text).catch(console.error);
+        }
+      }
+    });
+
+    // Revoke option
+    if (canRevoke) {
+      items.push({
+        text: '撤回消息',
+        action: async () => {
+          let auth = '';
+          if (getAdminToken()) {
+              try {
+                  auth = await getAdminAuthStr();
+              } catch (e) {
+                  console.error('Admin auth error', e);
+              }
+          }
+          send({
+            method: 'chat.revoke',
+            params: {
+              msgId: msg.id,
+              uid: myUid,
+              auth: auth
+            }
+          });
+        }
+      });
+    }
+
+    if (items.length > 0) {
+      const menu = buildContextMenu(items);
+      showContextMenu(menu, e.pageX, e.pageY);
+    }
+  });
+
+  line.appendChild(tsEl);
+  line.appendChild(userEl);
+  line.appendChild(textEl);
+  return line;
+}
+
 function renderChatList() {
   chatListEl.innerHTML = '';
   const list = activeTab === 'public' ? publicMsgs : roomMsgs;
   list.forEach(msg => {
-    const ts = formatChatTime(msg.time);
-    const line = document.createElement('div');
-    line.className = 'chat-line';
-    const tsEl = document.createElement('span');
-    tsEl.className = 'chat-ts';
-    tsEl.textContent = `[${ts}] `;
-    const userEl = document.createElement('span');
-    userEl.className = 'chat-user';
-    userEl.dataset.uid = msg.uid;
-    userEl.dataset.fallback = msg.name || '';
-    const currentName = getUserName(msg.uid, msg.name);
-    userEl.textContent = `${currentName}: `;
-    const textEl = document.createElement('span');
-    textEl.className = 'chat-text';
-    textEl.textContent = msg.text;
-    line.appendChild(tsEl);
-    line.appendChild(userEl);
-    line.appendChild(textEl);
+    const line = createChatLine(msg);
     chatListEl.appendChild(line);
   });
   chatListEl.scrollTop = chatListEl.scrollHeight;
@@ -2092,24 +2083,7 @@ function renderChatList() {
 function appendPublic(msg) {
   publicMsgs.push(msg);
   if (activeTab === 'public') {
-    const ts = formatChatTime(msg.time);
-    const line = document.createElement('div');
-    line.className = 'chat-line';
-    const tsEl = document.createElement('span');
-    tsEl.className = 'chat-ts';
-    tsEl.textContent = `[${ts}] `;
-    const userEl = document.createElement('span');
-    userEl.className = 'chat-user';
-    userEl.dataset.uid = msg.uid;
-    userEl.dataset.fallback = msg.name || '';
-    const currentName = getUserName(msg.uid, msg.name);
-    userEl.textContent = `${currentName}: `;
-    const textEl = document.createElement('span');
-    textEl.className = 'chat-text';
-    textEl.textContent = msg.text;
-    line.appendChild(tsEl);
-    line.appendChild(userEl);
-    line.appendChild(textEl);
+    const line = createChatLine(msg);
     chatListEl.appendChild(line);
     chatListEl.scrollTop = chatListEl.scrollHeight;
   }
@@ -2118,24 +2092,7 @@ function appendPublic(msg) {
 function appendRoom(msg) {
   roomMsgs.push(msg);
   if (activeTab === 'room') {
-    const ts = formatChatTime(msg.time);
-    const line = document.createElement('div');
-    line.className = 'chat-line';
-    const tsEl = document.createElement('span');
-    tsEl.className = 'chat-ts';
-    tsEl.textContent = `[${ts}] `;
-    const userEl = document.createElement('span');
-    userEl.className = 'chat-user';
-    userEl.dataset.uid = msg.uid;
-    userEl.dataset.fallback = msg.name || '';
-    const currentName = getUserName(msg.uid, msg.name);
-    userEl.textContent = `${currentName}: `;
-    const textEl = document.createElement('span');
-    textEl.className = 'chat-text';
-    textEl.textContent = msg.text;
-    line.appendChild(tsEl);
-    line.appendChild(userEl);
-    line.appendChild(textEl);
+    const line = createChatLine(msg);
     chatListEl.appendChild(line);
     chatListEl.scrollTop = chatListEl.scrollHeight;
   }
@@ -2145,13 +2102,104 @@ sendChatBtn.onclick = () => {
   const text = chatTextEl.value.trim();
   if (!text) return;
   if (activeTab === 'public') {
-    send({ method: 'chat.public', params: { uid: uidEl.value || '匿名', text } });
+    send({ method: 'chat.public', params: { uid: myUid, name: uidEl.value || '匿名', text } });
   } else {
     if (!sid) return;
-    send({ method: 'chat.room', params: { sid, uid: uidEl.value || '匿名', text } });
+    send({ method: 'chat.room', params: { sid, uid: myUid, text } });
   }
   chatTextEl.value = '';
 };
+
+function compressImage(file, maxSizeByte) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = event => {
+      const img = new Image();
+      img.src = event.target.result;
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Prefer original format, default to png if not jpeg/webp to support transparency
+        let type = file.type;
+        if (type !== 'image/jpeg' && type !== 'image/webp') {
+          type = 'image/png';
+        }
+        
+        let quality = 0.9;
+        let dataURL = canvas.toDataURL(type, quality);
+
+        // Loop to reduce size
+        // Note: PNG does not support quality parameter in toDataURL, so we can only resize dimensions for PNG
+        // For JPEG/WEBP we can try reducing quality first
+        
+        const isLossy = (type === 'image/jpeg' || type === 'image/webp');
+        
+        if (isLossy) {
+          while (dataURL.length > maxSizeByte * 1.37 && quality > 0.1) {
+            quality -= 0.1;
+            dataURL = canvas.toDataURL(type, quality);
+          }
+        }
+
+        // If still too big, resize dimensions
+        while (dataURL.length > maxSizeByte * 1.37 && width > 320) {
+          width = Math.round(width * 0.8);
+          height = Math.round(height * 0.8);
+          canvas.width = width;
+          canvas.height = height;
+          ctx.clearRect(0, 0, width, height); // Clear for transparency
+          ctx.drawImage(img, 0, 0, width, height); // Scale image to fit new dimensions
+          dataURL = canvas.toDataURL(type, quality);
+        }
+        
+        resolve(dataURL);
+      };
+      img.onerror = error => reject(error);
+    };
+    reader.onerror = error => reject(error);
+  });
+}
+
+function updateUploadUI() {
+  if (chatImgBtn) {
+    chatImgBtn.style.display = allowUploads ? 'inline-block' : 'none';
+  }
+}
+
+if (chatImgBtn && chatImgInput) {
+  chatImgBtn.onclick = () => chatImgInput.click();
+  chatImgInput.onchange = async () => {
+    if (!allowUploads) {
+      alert('服务器不允许上传图片');
+      chatImgInput.value = '';
+      return;
+    }
+    if (chatImgInput.files && chatImgInput.files[0]) {
+      const file = chatImgInput.files[0];
+      try {
+        const base64 = await compressImage(file, 1024 * 1024 * 1024); // Limit to 10MB
+        if (activeTab === 'public') {
+          send({ method: 'chat.public', params: { uid: myUid, name: uidEl.value || '匿名', text: base64 } });
+        } else {
+          if (!sid) return;
+          send({ method: 'chat.room', params: { sid, uid: myUid, text: base64 } });
+        }
+        chatImgInput.value = '';
+      } catch (e) {
+        console.error('Image processing failed', e);
+        alert('图片处理失败');
+      }
+    }
+  };
+}
+
 chatTextEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
@@ -2164,6 +2212,34 @@ chatTextEl.addEventListener('input', () => {
   chatTextEl.style.height = Math.min(chatTextEl.scrollHeight, max) + 'px';
   chatTextEl.style.overflowY = chatTextEl.scrollHeight > max ? 'auto' : 'hidden';
 });
+
+// Paste image handler
+chatTextEl.addEventListener('paste', async (e) => {
+  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+  for (let index in items) {
+    const item = items[index];
+    if (item.kind === 'file' && item.type.indexOf('image/') !== -1) {
+      if (!allowUploads) {
+        alert('服务器不允许上传图片');
+        return;
+      }
+      const file = item.getAsFile();
+      try {
+        const base64 = await compressImage(file, 1024 * 1024 * 1024); // Limit to 10MB
+        if (activeTab === 'public') {
+          send({ method: 'chat.public', params: { uid: myUid, name: uidEl.value || '匿名', text: base64 } });
+        } else {
+          if (!sid) return;
+          send({ method: 'chat.room', params: { sid, uid: myUid, text: base64 } });
+        }
+      } catch (err) {
+        console.error('Paste image failed', err);
+        alert('图片处理失败');
+      }
+    }
+  }
+});
+
 tabPublicBtn.onclick = () => {
   activeTab = 'public';
   tabPublicBtn.classList.add('active');

@@ -4,10 +4,12 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/newton-miku/WeSpeek/internal/api"
 	"github.com/newton-miku/WeSpeek/internal/server"
+	"github.com/newton-miku/WeSpeek/internal/store/local"
 	"github.com/newton-miku/WeSpeek/internal/store/sqlite"
 	"github.com/newton-miku/WeSpeek/internal/util"
 )
@@ -23,7 +25,24 @@ func main() {
 	}
 	defer st.Close()
 
-	srv := server.New(st)
+	// Initialize FileStore (currently local)
+	// Can be extended to support S3/MinIO based on config
+	// Store in data/uploads instead of web/uploads for better Docker compatibility
+	fileStore := local.NewFileStore("data/uploads/img", "/uploads/img")
+
+	srv := server.New(st, fileStore)
+
+	// Configure server behavior from environment
+	if val := os.Getenv("WSPEEK_STORE_IMAGES"); val != "" {
+		srv.StoreImagesAsFiles = val == "true"
+	} else {
+		srv.StoreImagesAsFiles = true // Default to true
+	}
+
+	if val := os.Getenv("WSPEEK_ALLOW_UPLOAD"); val != "" {
+		srv.AllowUploads = val == "true"
+	}
+
 	if err := srv.Init(); err != nil {
 		log.Fatal(err)
 	}
@@ -38,11 +57,16 @@ func main() {
 	mux.HandleFunc("/api/rooms/", apiHandler.RoomMembersHandler)
 	mux.HandleFunc("/api/chat/public", apiHandler.PublicChatHandler)
 	mux.HandleFunc("/api/chat/room/", apiHandler.RoomChatHandler)
+	mux.HandleFunc("/api/upload", apiHandler.UploadHandler)
 	mux.HandleFunc("/api/admin/challenge", apiHandler.AdminChallengeHandler)
 	mux.HandleFunc("/api/admin/move_user", apiHandler.AdminMoveUserHandler)
 	mux.HandleFunc("/api/admin/setup", apiHandler.AdminSetupHandler)
 	mux.HandleFunc("/api/groups", apiHandler.GroupsHandler)
 	mux.HandleFunc("/api/groups/", apiHandler.GroupsHandler)
+
+	// Serve uploaded files
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("data/uploads"))))
+
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
 	addr := util.EnvOr("WSPEEK_ADDR", ":7000")

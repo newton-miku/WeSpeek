@@ -78,6 +78,7 @@ type memberInfo struct {
 }
 
 type ChatMessage struct {
+	ID   int64  `json:"id"`
 	UID  string `json:"uid"`
 	Name string `json:"name"`
 	Text string `json:"text"`

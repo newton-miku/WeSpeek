@@ -438,6 +438,15 @@ button:disabled {
   word-wrap: break-word;
 }
 
+.chat-img {
+  max-width: 240px;
+  max-height: 240px;
+  border-radius: 8px;
+  margin-top: 4px;
+  cursor: pointer;
+  display: block;
+}
+
 /* Footer controls for chat */
 .subpanel .row {
   display: flex;

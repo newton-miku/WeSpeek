@@ -34,6 +34,7 @@ func (s *Server) GetRoomChatHistory(id string) ([]ChatMessage, error) {
 
 func toServerChatMessage(m entity.ChatMessage) ChatMessage {
 	return ChatMessage{
+		ID:   m.ID,
 		UID:  m.UID,
 		Name: m.Name,
 		Text: m.Text,

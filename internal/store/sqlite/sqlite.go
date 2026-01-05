@@ -63,6 +63,11 @@ func (s *SqliteStore) init() error {
 			created_at INTEGER
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_room_time ON chat_messages(room_id, created_at);`,
+		`CREATE TABLE IF NOT EXISTS file_refs (
+			path TEXT PRIMARY KEY,
+			ref_count INTEGER DEFAULT 0,
+			updated_at INTEGER
+		);`,
 	}
 
 	for _, q := range queries {
@@ -216,12 +221,28 @@ func (s *SqliteStore) DeleteAdminSecret(secret string) error {
 	return err
 }
 
-func (s *SqliteStore) SaveChatMessage(msg entity.ChatMessage) error {
-	_, err := s.db.Exec(`
+func (s *SqliteStore) SaveChatMessage(msg entity.ChatMessage) (int64, error) {
+	res, err := s.db.Exec(`
 		INSERT INTO chat_messages (room_id, uid, name, text, created_at)
 		VALUES (?, ?, ?, ?, ?)
 	`, msg.RoomID, msg.UID, msg.Name, msg.Text, msg.CreatedAt)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *SqliteStore) GetChatMessage(id int64) (entity.ChatMessage, error) {
+	var m entity.ChatMessage
+	err := s.db.QueryRow(`
+		SELECT id, room_id, uid, name, text, created_at
+		FROM chat_messages
+		WHERE id = ?
+	`, id).Scan(&m.ID, &m.RoomID, &m.UID, &m.Name, &m.Text, &m.CreatedAt)
+	if err != nil {
+		return entity.ChatMessage{}, err
+	}
+	return m, nil
 }
 
 func (s *SqliteStore) GetChatHistory(roomID string, limit int) ([]entity.ChatMessage, error) {
@@ -254,8 +275,77 @@ func (s *SqliteStore) GetChatHistory(roomID string, limit int) ([]entity.ChatMes
 	return msgs, nil
 }
 
+func (s *SqliteStore) GetOldChatMessages(retentionDays int) ([]entity.ChatMessage, error) {
+	cutoff := time.Now().AddDate(0, 0, -retentionDays).Unix()
+	rows, err := s.db.Query(`
+		SELECT id, room_id, uid, name, text, created_at
+		FROM chat_messages
+		WHERE created_at < ?
+	`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []entity.ChatMessage
+	for rows.Next() {
+		var m entity.ChatMessage
+		if err := rows.Scan(&m.ID, &m.RoomID, &m.UID, &m.Name, &m.Text, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, nil
+}
+
 func (s *SqliteStore) DeleteOldChatMessages(retentionDays int) error {
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).Unix()
 	_, err := s.db.Exec("DELETE FROM chat_messages WHERE created_at < ?", cutoff)
 	return err
+}
+
+func (s *SqliteStore) DeleteChatMessage(id int64) error {
+	_, err := s.db.Exec("DELETE FROM chat_messages WHERE id = ?", id)
+	return err
+}
+
+func (s *SqliteStore) IncFileRef(path string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO file_refs (path, ref_count, updated_at)
+		VALUES (?, 1, strftime('%s', 'now'))
+		ON CONFLICT(path) DO UPDATE SET
+		ref_count = ref_count + 1,
+		updated_at = excluded.updated_at
+	`, path)
+	return err
+}
+
+func (s *SqliteStore) DecFileRef(path string) (int64, error) {
+	// We do this in a transaction to ensure atomic read-modify-write if needed,
+	// but single UPDATE with RETURNING is atomic in SQLite.
+	// Note: RETURNING clause is available in newer SQLite versions (3.35.0+, 2021).
+	// modernc.org/sqlite supports it.
+	
+	var newCount int64
+	err := s.db.QueryRow(`
+		UPDATE file_refs 
+		SET ref_count = ref_count - 1, updated_at = strftime('%s', 'now')
+		WHERE path = ?
+		RETURNING ref_count
+	`, path).Scan(&newCount)
+	
+	if err == sql.ErrNoRows {
+		// Path not found, maybe legacy data or already deleted. Treat as 0.
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	
+	if newCount <= 0 {
+		_, _ = s.db.Exec("DELETE FROM file_refs WHERE path = ?", path)
+		return 0, nil
+	}
+	
+	return newCount, nil
 }

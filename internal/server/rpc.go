@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -19,6 +20,8 @@ func (s *Server) dispatchRPC(c *Client, m rpcMessage) {
 		s.handleChatPublic(c, m.Params)
 	case "chat.room":
 		s.handleChatRoom(c, m.Params)
+	case "chat.revoke":
+		s.handleChatRevoke(c, m.Params)
 	case "rename":
 		s.handleRename(c, m.Params)
 	case "name":
@@ -78,6 +81,19 @@ func (s *Server) handleSubscribe(c *Client) {
 		Method string        `json:"method"`
 		Params []ChatMessage `json:"params"`
 	}{Method: "chat.public.history", Params: publicHistory}
+
+	// Send server config
+	c.msgCh <- struct {
+		Method string `json:"method"`
+		Params struct {
+			AllowUploads bool `json:"allowUploads"`
+		} `json:"params"`
+	}{
+		Method: "server.config",
+		Params: struct {
+			AllowUploads bool `json:"allowUploads"`
+		}{AllowUploads: s.AllowUploads},
+	}
 }
 
 func (s *Server) handleJoin(c *Client, params json.RawMessage) {
@@ -136,21 +152,30 @@ func (s *Server) handleChatPublic(c *Client, params json.RawMessage) {
 	if name == "" {
 		return
 	}
+
+	text := in.Text
+	if s.StoreImagesAsFiles && strings.HasPrefix(text, "data:image/") {
+		if url, err := s.saveBase64Image(text); err == nil {
+			text = "image:" + url
+		}
+	}
+
 	msg := ChatMessage{
 		UID:  in.UID,
 		Name: name,
-		Text: in.Text,
+		Text: text,
 		Time: time.Now().Unix(),
 	}
 
 	// Save to DB
-	_ = s.chatService.SaveMessage(entity.ChatMessage{
+	id, _ := s.chatService.SaveMessage(entity.ChatMessage{
 		RoomID:    "",
 		UID:       msg.UID,
 		Name:      msg.Name,
 		Text:      msg.Text,
 		CreatedAt: msg.Time,
 	})
+	msg.ID = id
 
 	// Broadcast
 	s.clients.Range(func(key, value interface{}) bool {
@@ -174,21 +199,30 @@ func (s *Server) handleChatRoom(c *Client, params json.RawMessage) {
 	if c.peer == nil {
 		return
 	}
+
+	text := in.Text
+	if s.StoreImagesAsFiles && strings.HasPrefix(text, "data:image/") {
+		if url, err := s.saveBase64Image(text); err == nil {
+			text = "image:" + url
+		}
+	}
+
 	msg := ChatMessage{
 		UID:  c.peer.uid,
 		Name: c.peer.name,
-		Text: in.Text,
+		Text: text,
 		Time: time.Now().Unix(),
 	}
 
 	// Save to DB
-	_ = s.chatService.SaveMessage(entity.ChatMessage{
+	id, _ := s.chatService.SaveMessage(entity.ChatMessage{
 		RoomID:    c.peer.room.id,
 		UID:       msg.UID,
 		Name:      msg.Name,
 		Text:      msg.Text,
 		CreatedAt: msg.Time,
 	})
+	msg.ID = id
 
 	for _, peer := range c.peer.room.peers {
 		peer.send(struct {
@@ -227,6 +261,84 @@ func (s *Server) handleName(c *Client, params json.RawMessage) {
 	c.peer.room.mu.Unlock()
 	s.broadcastRoomUpdate(c.peer.room)
 	s.broadcastRoomsUpdate()
+}
+
+func (s *Server) handleChatRevoke(c *Client, params json.RawMessage) {
+	var in struct {
+		MsgID int64  `json:"msgId"`
+		UID   string `json:"uid"`
+		Auth  string `json:"auth"`
+	}
+	if err := json.Unmarshal(params, &in); err != nil {
+		return
+	}
+
+	msg, err := s.chatService.GetMessage(in.MsgID)
+	if err != nil {
+		return
+	}
+
+	isAdmin := false
+	if in.Auth != "" {
+		parts := strings.Split(in.Auth, ":")
+		if len(parts) == 2 && s.VerifyAdmin(parts[0], parts[1]) {
+			isAdmin = true
+		}
+	}
+
+	requestUID := in.UID
+	if c.peer != nil {
+		requestUID = c.peer.uid
+	}
+	if !isAdmin && requestUID == "" {
+		return
+	}
+
+	isOwner := (msg.UID == requestUID)
+	// 2 minutes limit
+	isWithinTime := (time.Now().Unix() - msg.CreatedAt) <= 120
+
+	if isAdmin || (isOwner && isWithinTime) {
+		if err := s.chatService.DeleteMessage(in.MsgID); err == nil {
+			// Construct revoke message
+			out := struct {
+				Method string `json:"method"`
+				Params struct {
+					MsgID int64 `json:"msgId"`
+				} `json:"params"`
+			}{
+				Method: "chat.revoke",
+				Params: struct {
+					MsgID int64 `json:"msgId"`
+				}{MsgID: in.MsgID},
+			}
+
+			// Broadcast
+			if msg.RoomID == "" {
+				s.clients.Range(func(key, value interface{}) bool {
+					send := value.(func(interface{}))
+					send(out)
+					return true
+				})
+			} else {
+				if r, ok := s.rooms.Load(msg.RoomID); ok {
+					rm := r.(*room)
+					rm.mu.RLock()
+					for _, p := range rm.peers {
+						p.send(out)
+					}
+					rm.mu.RUnlock()
+				}
+			}
+		}
+	}
+}
+
+func (s *Server) saveBase64Image(data string) (string, error) {
+	if s.mediaService == nil {
+		return "", fmt.Errorf("media service not initialized")
+	}
+	return s.mediaService.SaveBase64Image(data)
 }
 
 func (s *Server) handleIOSet(c *Client, params json.RawMessage) {
@@ -388,11 +500,11 @@ func (s *Server) handleAdminUpdateRoom(c *Client, params json.RawMessage) {
 			rm.audioQuality = *in.AudioQuality
 		}
 		_ = s.roomService.SaveRoom(entity.Room{
-			ID:        rm.id,
-			Permanent: rm.permanent,
-			Order:     rm.order,
-			Group:     rm.group,
-			AudioCodec:  rm.audioCodec,
+			ID:           rm.id,
+			Permanent:    rm.permanent,
+			Order:        rm.order,
+			Group:        rm.group,
+			AudioCodec:   rm.audioCodec,
 			AudioQuality: rm.audioQuality,
 		})
 		s.broadcastRoomsUpdate()

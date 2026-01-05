@@ -1,11 +1,14 @@
 package server
 
 import (
+	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/newton-miku/WeSpeek/internal/domain/entity"
+	"github.com/newton-miku/WeSpeek/internal/domain/repository"
 	"github.com/newton-miku/WeSpeek/internal/service"
 	"github.com/newton-miku/WeSpeek/internal/store"
 )
@@ -14,6 +17,8 @@ type Server struct {
 	roomService  *service.RoomService
 	chatService  *service.ChatService
 	adminService *service.AdminService
+	mediaService *service.MediaService
+	fileStore    repository.FileStore
 
 	// State
 	rooms           sync.Map // map[string]*room
@@ -21,17 +26,83 @@ type Server struct {
 	latencySubs     sync.Map // map[string]func(interface{})
 	adminChallenges sync.Map
 	groups          sync.Map // map[string]struct{}
+
+	// Config
+	StoreImagesAsFiles bool
+	AllowUploads       bool
 }
 
-func New(s store.Store) *Server {
+func New(s store.Store, fs repository.FileStore) *Server {
+	ms := service.NewMediaService(fs, true)
 	return &Server{
 		roomService:  service.NewRoomService(s, s),
-		chatService:  service.NewChatService(s),
+		chatService:  service.NewChatService(s, ms),
 		adminService: service.NewAdminService(s),
+		mediaService: ms,
+		fileStore:    fs,
+		AllowUploads: true, // Default allow
 	}
 }
 
+func (s *Server) GetFileStore() repository.FileStore {
+	return s.fileStore
+}
+
+func (s *Server) SaveImage(filename string, r io.Reader) (string, error) {
+	if s.mediaService == nil {
+		// Just in case Init wasn't called or something
+		return "", errors.New("media service not initialized")
+	}
+	return s.mediaService.SaveImage(filename, r)
+}
+
 func (s *Server) Init() error {
+	// Initialize MediaService
+	s.mediaService = service.NewMediaService(s.fileStore, s.AllowUploads)
+	// Update ChatService with new MediaService
+	// Note: We need to access the repo from existing chatService or re-create it.
+	// Since we don't expose repo, we can't easily re-create it without the store.
+	// However, s.chatService is created in New with 's' (store).
+	// But Server struct doesn't keep 's' (store).
+	// Wait, Server struct DOES NOT keep the store interface.
+
+	// Issue: Server struct in line 16 does not have 'store' field.
+	// New takes 'store.Store' but doesn't save it in Server struct.
+	// So we cannot re-create ChatService here unless we change Server struct.
+
+	// BUT, we can just assume MediaService created in New is sufficient?
+	// No, Init is called later, potentially after config load (AllowUploads).
+	// If AllowUploads changes, we need to update MediaService.
+
+	// Solution: Add SetMediaService to ChatService?
+	// Or simply update the mediaService instance in place? No.
+
+	// Let's check if we can add 'store' to Server struct.
+	// Or just update ChatService.
+
+	// Actually, ChatService depends on MediaService for deletion.
+	// If MediaService changes (e.g. AllowUploads flag), deletion should still work?
+	// Yes, deletion only depends on FileStore, which doesn't change.
+	// AllowUploads only affects Save.
+	// So even if we have an "old" MediaService in ChatService with old AllowUploads, DeleteFile will still work as long as FileStore is valid.
+	// And FileStore is 's.fileStore' which is constant.
+
+	// However, it's better to keep them in sync.
+	// Let's see if we can easily add SetMediaService.
+
+	// I'll add SetMediaService to ChatService.
+
+	// For now, let's just update Init to re-create MediaService and try to update ChatService.
+	// Since I can't re-create ChatService without Store, I'll add SetMediaService.
+
+	// Step 1: Add SetMediaService to ChatService.
+	// Step 2: Call it in Init.
+
+	s.mediaService = service.NewMediaService(s.fileStore, s.AllowUploads)
+	if s.chatService != nil {
+		s.chatService.SetMediaService(s.mediaService)
+	}
+
 	// Load rooms
 	rooms, err := s.roomService.GetRooms()
 	if err != nil {
@@ -57,13 +128,13 @@ func (s *Server) Init() error {
 
 	for _, r := range rooms {
 		s.rooms.Store(r.ID, &room{
-			id:        r.ID,
-			group:     r.Group,
-			order:     r.Order,
-			audioCodec: r.AudioCodec,
+			id:           r.ID,
+			group:        r.Group,
+			order:        r.Order,
+			audioCodec:   r.AudioCodec,
 			audioQuality: r.AudioQuality,
-			permanent: r.Permanent,
-			peers:     make(map[string]*peer),
+			permanent:    r.Permanent,
+			peers:        make(map[string]*peer),
 		})
 	}
 

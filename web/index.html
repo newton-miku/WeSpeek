@@ -44,6 +44,8 @@
         </div>
         <div id="chatList" class="list"></div>
         <div class="row">
+          <input type="file" id="chatImgInput" accept="image/*" style="display:none">
+          <button id="chatImgBtn" class="icon-btn" title="发送图片" style="margin-right:8px;padding:4px 8px;">🖼️</button>
           <textarea id="chatText" class="chat-input" placeholder="输入消息，Enter发送，Shift+Enter换行"></textarea>
           <button id="sendChat" class="chat-send">发送</button>
         </div>
@@ -77,7 +79,6 @@
             <option value="opus">Opus</option>
             <option value="pcm16">PCM16</option>
             <option value="pcmf32">PCM Float32</option>
-            <option value="ima_adpcm">IMA-ADPCM</option>
           </select>
         </div>
         <div class="row">

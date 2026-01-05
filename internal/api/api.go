@@ -200,6 +200,45 @@ func (a *API) RoomChatHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(history)
 }
 
+func (a *API) UploadHandler(w http.ResponseWriter, r *http.Request) {
+	if !a.server.AllowUploads {
+		http.Error(w, "uploading not allowed", http.StatusForbidden)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Limit 10MB
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, "file too large", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "invalid file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	url, err := a.server.SaveImage(header.Filename, file)
+	if err != nil {
+		if err.Error() == "uploading not allowed" {
+			http.Error(w, "uploading not allowed", http.StatusForbidden)
+		} else {
+			http.Error(w, "server error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"url": url})
+}
+
 func (a *API) AdminSetupHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
