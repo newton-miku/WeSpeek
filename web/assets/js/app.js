@@ -1037,6 +1037,7 @@ function connectWS() {
     connStatus.className = 'status warn';
     connected = false;
     updateHeaderIcons();
+    playNotification('disconnect');
     
     // Save state before clearing
     if (sid) lastJoinedRoom = sid;
@@ -2044,9 +2045,43 @@ function createChatLine(msg) {
     const img = document.createElement('img');
     img.src = msg.text.startsWith('image:') ? msg.text.substring(6) : msg.text;
     img.className = 'chat-img';
-    img.onclick = () => {
-      const win = window.open();
-      if (win) win.document.write('<img src="' + img.src + '" style="max-width:100%"/>');
+    
+    // Image zoom logic
+    img.onclick = (e) => {
+        e.stopPropagation();
+        
+        // Create backdrop
+        const backdrop = document.createElement('div');
+        backdrop.className = 'img-zoom-backdrop';
+        
+        // Create cloned image for zoom
+        const zoomedImg = document.createElement('img');
+        zoomedImg.src = img.src;
+        zoomedImg.className = 'img-zoom-content';
+        
+        // Close handler
+        const closeZoom = () => {
+            backdrop.classList.remove('active');
+            zoomedImg.classList.remove('active');
+            setTimeout(() => {
+                if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+            }, 300);
+        };
+        
+        backdrop.onclick = closeZoom;
+        zoomedImg.onclick = (e) => {
+            e.stopPropagation();
+            closeZoom();
+        };
+        
+        backdrop.appendChild(zoomedImg);
+        document.body.appendChild(backdrop);
+        
+        // Trigger animation
+        requestAnimationFrame(() => {
+            backdrop.classList.add('active');
+            zoomedImg.classList.add('active');
+        });
     };
     textEl.appendChild(img);
   } else {
@@ -2060,13 +2095,24 @@ function createChatLine(msg) {
     // Copy option
     items.push({
       text: '复制',
-      action: () => {
-        if (msg.text && !msg.text.startsWith('data:image/') && !msg.text.startsWith('image:')) {
-          navigator.clipboard.writeText(msg.text).catch(console.error);
+      action: async () => {
+        if (msg.text && (msg.text.startsWith('data:image/') || msg.text.startsWith('image:'))) {
+          try {
+             const url = msg.text.startsWith('image:') ? msg.text.substring(6) : msg.text;
+             const res = await fetch(url);
+             const blob = await res.blob();
+             await navigator.clipboard.write([
+                 new ClipboardItem({
+                     [blob.type]: blob
+                 })
+             ]);
+          } catch (err) {
+             console.error('Copy image failed', err);
+             // Fallback to text copy if image copy fails
+             navigator.clipboard.writeText(msg.text).catch(console.error);
+          }
         } else {
-          // For images, we could copy the base64 or notify user
-          // Currently just trying to copy text content if possible
-           navigator.clipboard.writeText(msg.text).catch(console.error);
+          navigator.clipboard.writeText(msg.text).catch(console.error);
         }
       }
     });
@@ -2339,6 +2385,14 @@ function playNotification(type) {
       gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
       osc.start(now);
       osc.stop(now + 0.2);
+    } else if (type === 'disconnect') {
+      // Low pitch double beep for disconnect
+      osc.frequency.setValueAtTime(150, now);
+      osc.frequency.setValueAtTime(100, now + 0.2);
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.linearRampToValueAtTime(0.01, now + 0.4);
+      osc.start(now);
+      osc.stop(now + 0.4);
     }
   } catch (e) { console.warn(e); }
 }
