@@ -2097,10 +2097,22 @@ function createChatLine(msg) {
       text: '复制',
       action: async () => {
         if (msg.text && (msg.text.startsWith('data:image/') || msg.text.startsWith('image:'))) {
+          const url = msg.text.startsWith('image:') ? msg.text.substring(6) : msg.text;
           try {
-             const url = msg.text.startsWith('image:') ? msg.text.substring(6) : msg.text;
              const res = await fetch(url);
-             const blob = await res.blob();
+             let blob = await res.blob();
+             
+             // Convert to PNG if not already (for better clipboard compatibility)
+             if (blob.type !== 'image/png') {
+                 const imgBitmap = await createImageBitmap(blob);
+                 const canvas = document.createElement('canvas');
+                 canvas.width = imgBitmap.width;
+                 canvas.height = imgBitmap.height;
+                 const ctx = canvas.getContext('2d');
+                 ctx.drawImage(imgBitmap, 0, 0);
+                 blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+             }
+
              await navigator.clipboard.write([
                  new ClipboardItem({
                      [blob.type]: blob
@@ -2108,8 +2120,13 @@ function createChatLine(msg) {
              ]);
           } catch (err) {
              console.error('Copy image failed', err);
-             // Fallback to text copy if image copy fails
-             navigator.clipboard.writeText(msg.text).catch(console.error);
+             // Fallback to absolute URL if image copy fails
+             try {
+                 const absUrl = new URL(url, window.location.href).href;
+                 await navigator.clipboard.writeText(absUrl);
+             } catch (e) {
+                 console.error('Copy fallback failed', e);
+             }
           }
         } else {
           navigator.clipboard.writeText(msg.text).catch(console.error);
