@@ -10,4 +10,8 @@ services:
       - ./data:/data
     environment:
       - WSPEEK_ADDR=:7000
+      - WSPEEK_STORE_IMAGES=true
+      - WSPEEK_ALLOW_UPLOAD=true
+      - WSPEEK_UPLOAD_DIR=/data/uploads
+      - TZ=Asia/Shanghai
   
