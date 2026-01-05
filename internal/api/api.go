@@ -44,11 +44,13 @@ func (a *API) RoomsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			ID        string `json:"id"`
-			Permanent bool   `json:"permanent"`
-			Group     string `json:"group"`
-			Parent    string `json:"parent"`
-			Order     int    `json:"order"`
+			ID           string `json:"id"`
+			Permanent    bool   `json:"permanent"`
+			Group        string `json:"group"`
+			Parent       string `json:"parent"`
+			Order        int    `json:"order"`
+			AudioCodec   string `json:"audioCodec"`
+			AudioQuality int    `json:"audioQuality"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -61,6 +63,9 @@ func (a *API) RoomsHandler(w http.ResponseWriter, r *http.Request) {
 		if err := a.server.CreateOrUpdateRoom(body.ID, body.Permanent, body.Group, body.Order); err != nil {
 			http.Error(w, "failed to save room", http.StatusInternalServerError)
 			return
+		}
+		if body.AudioCodec != "" || body.AudioQuality != 0 {
+			_ = a.server.UpdateRoomAudio(body.ID, body.AudioCodec, body.AudioQuality)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:

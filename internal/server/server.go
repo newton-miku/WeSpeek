@@ -60,6 +60,8 @@ func (s *Server) Init() error {
 			id:        r.ID,
 			group:     r.Group,
 			order:     r.Order,
+			audioCodec: r.AudioCodec,
+			audioQuality: r.AudioQuality,
 			permanent: r.Permanent,
 			peers:     make(map[string]*peer),
 		})

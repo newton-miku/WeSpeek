@@ -42,7 +42,9 @@ func (s *SqliteStore) init() error {
 			id TEXT PRIMARY KEY,
 			group_name TEXT,
 			sort_order INTEGER,
-			permanent INTEGER
+			permanent INTEGER,
+			audio_codec TEXT,
+			audio_quality INTEGER
 		);`,
 		`CREATE TABLE IF NOT EXISTS groups (
 			name TEXT PRIMARY KEY
@@ -68,6 +70,8 @@ func (s *SqliteStore) init() error {
 			return fmt.Errorf("init query failed: %w", err)
 		}
 	}
+	_, _ = s.db.Exec(`ALTER TABLE rooms ADD COLUMN audio_codec TEXT`)
+	_, _ = s.db.Exec(`ALTER TABLE rooms ADD COLUMN audio_quality INTEGER`)
 	return nil
 }
 
@@ -76,7 +80,7 @@ func (s *SqliteStore) Close() error {
 }
 
 func (s *SqliteStore) GetRooms() ([]entity.Room, error) {
-	rows, err := s.db.Query("SELECT id, group_name, sort_order, permanent FROM rooms")
+	rows, err := s.db.Query("SELECT id, group_name, sort_order, permanent, audio_codec, audio_quality FROM rooms")
 	if err != nil {
 		return nil, err
 	}
@@ -86,26 +90,50 @@ func (s *SqliteStore) GetRooms() ([]entity.Room, error) {
 	for rows.Next() {
 		var r entity.Room
 		var perm int
-		if err := rows.Scan(&r.ID, &r.Group, &r.Order, &perm); err != nil {
+		var codec sql.NullString
+		var quality sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.Group, &r.Order, &perm, &codec, &quality); err != nil {
 			return nil, err
 		}
 		r.Permanent = perm == 1
+		if codec.Valid {
+			r.AudioCodec = codec.String
+		} else {
+			r.AudioCodec = "opus"
+		}
+		if quality.Valid {
+			r.AudioQuality = int(quality.Int64)
+		} else {
+			r.AudioQuality = 6
+		}
 		rooms = append(rooms, r)
 	}
 	return rooms, nil
 }
 
 func (s *SqliteStore) GetRoom(id string) (*entity.Room, error) {
-	row := s.db.QueryRow("SELECT id, group_name, sort_order, permanent FROM rooms WHERE id = ?", id)
+	row := s.db.QueryRow("SELECT id, group_name, sort_order, permanent, audio_codec, audio_quality FROM rooms WHERE id = ?", id)
 	var r entity.Room
 	var perm int
-	if err := row.Scan(&r.ID, &r.Group, &r.Order, &perm); err != nil {
+	var codec sql.NullString
+	var quality sql.NullInt64
+	if err := row.Scan(&r.ID, &r.Group, &r.Order, &perm, &codec, &quality); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, store.ErrNotFound
 		}
 		return nil, err
 	}
 	r.Permanent = perm == 1
+	if codec.Valid {
+		r.AudioCodec = codec.String
+	} else {
+		r.AudioCodec = "opus"
+	}
+	if quality.Valid {
+		r.AudioQuality = int(quality.Int64)
+	} else {
+		r.AudioQuality = 6
+	}
 	return &r, nil
 }
 
@@ -115,13 +143,15 @@ func (s *SqliteStore) SaveRoom(r entity.Room) error {
 		perm = 1
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO rooms (id, group_name, sort_order, permanent)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO rooms (id, group_name, sort_order, permanent, audio_codec, audio_quality)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		group_name = excluded.group_name,
 		sort_order = excluded.sort_order,
-		permanent = excluded.permanent
-	`, r.ID, r.Group, r.Order, perm)
+		permanent = excluded.permanent,
+		audio_codec = excluded.audio_codec,
+		audio_quality = excluded.audio_quality
+	`, r.ID, r.Group, r.Order, perm, r.AudioCodec, r.AudioQuality)
 	return err
 }
 

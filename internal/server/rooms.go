@@ -31,7 +31,7 @@ func (s *Server) GetRoomsSnapshot() []RoomInfo {
 			return rmIDs[i].Name < rmIDs[j].Name
 		})
 		list = append(list, RoomInfo{
-			ID: rm.id, Members: rmIDs, Permanent: rm.permanent, Group: rm.group, Order: rm.order, Description: rm.description,
+			ID: rm.id, Members: rmIDs, Permanent: rm.permanent, Group: rm.group, Order: rm.order, Description: rm.description, AudioCodec: rm.audioCodec, AudioQuality: rm.audioQuality,
 		})
 		return true
 	})
@@ -62,7 +62,7 @@ func (s *Server) CreateOrUpdateRoom(id string, permanent bool, group string, ord
 
 	v, ok := s.rooms.Load(id)
 	if !ok {
-		rm := &room{id: id, group: group, peers: map[string]*peer{}, permanent: permanent, order: order}
+		rm := &room{id: id, group: group, peers: map[string]*peer{}, permanent: permanent, order: order, audioCodec: "opus", audioQuality: 6}
 		s.rooms.Store(id, rm)
 		if !rm.permanent {
 			s.scheduleRoomCleanup(rm)
@@ -72,6 +72,12 @@ func (s *Server) CreateOrUpdateRoom(id string, permanent bool, group string, ord
 		rm.permanent = permanent
 		rm.group = group
 		rm.order = order
+		if rm.audioCodec == "" {
+			rm.audioCodec = "opus"
+		}
+		if rm.audioQuality == 0 {
+			rm.audioQuality = 6
+		}
 		if rm.permanent {
 			if rm.deleteTimer != nil {
 				rm.deleteTimer.Stop()
@@ -81,6 +87,14 @@ func (s *Server) CreateOrUpdateRoom(id string, permanent bool, group string, ord
 			s.scheduleRoomCleanup(rm)
 		}
 	}
+	_ = s.roomService.SaveRoom(entity.Room{
+		ID:           id,
+		Group:        group,
+		Order:        order,
+		Permanent:    permanent,
+		AudioCodec:   "opus",
+		AudioQuality: 6,
+	})
 	s.broadcastRoomsUpdate()
 	return nil
 }
@@ -163,6 +177,30 @@ func (s *Server) broadcastRoomUpdate(rm *room) {
 		Members []memberInfo `json:"members"`
 	}{ID: rm.id, Members: members}}
 	s.broadcastAll(out)
+}
+
+func (s *Server) UpdateRoomAudio(id, codec string, quality int) error {
+	v, ok := s.rooms.Load(id)
+	if !ok {
+		return store.ErrNotFound
+	}
+	rm := v.(*room)
+	if codec != "" {
+		rm.audioCodec = codec
+	}
+	if quality != 0 {
+		rm.audioQuality = quality
+	}
+	_ = s.roomService.SaveRoom(entity.Room{
+		ID:           rm.id,
+		Group:        rm.group,
+		Order:        rm.order,
+		Permanent:    rm.permanent,
+		AudioCodec:   rm.audioCodec,
+		AudioQuality: rm.audioQuality,
+	})
+	s.broadcastRoomsUpdate()
+	return nil
 }
 
 func (s *Server) getOrCreateRoom(id string) *room {

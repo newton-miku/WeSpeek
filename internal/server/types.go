@@ -62,6 +62,8 @@ type room struct {
 	group       string
 	description string
 	order       int
+	audioCodec  string
+	audioQuality int
 	peers       map[string]*peer
 	permanent   bool
 	deleteTimer *time.Timer
@@ -87,6 +89,8 @@ type RoomInfo struct {
 	Group       string              `json:"group"`
 	Description string              `json:"description"`
 	Order       int                 `json:"order"`
+	AudioCodec  string              `json:"audioCodec"`
+	AudioQuality int                `json:"audioQuality"`
 	Count       int                 `json:"count"`
 	Members     []RoomMemberSummary `json:"members"`
 	Permanent   bool                `json:"permanent"`

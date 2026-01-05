@@ -5,4 +5,6 @@ type Room struct {
 	Group     string
 	Order     int
 	Permanent bool
+	AudioCodec string
+	AudioQuality int
 }
