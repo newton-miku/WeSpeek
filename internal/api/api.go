@@ -44,28 +44,52 @@ func (a *API) RoomsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			ID           string `json:"id"`
-			Permanent    bool   `json:"permanent"`
-			Group        string `json:"group"`
-			Parent       string `json:"parent"`
-			Order        int    `json:"order"`
-			AudioCodec   string `json:"audioCodec"`
-			AudioQuality int    `json:"audioQuality"`
+			ID           string  `json:"id"`
+			Permanent    *bool   `json:"permanent"`
+			Group        *string `json:"group"`
+			Parent       *string `json:"parent"`
+			Order        *int    `json:"order"`
+			AudioCodec   *string `json:"audioCodec"`
+			AudioQuality *int    `json:"audioQuality"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		if body.Group == "" && body.Parent != "" {
+		if (body.Group == nil || *body.Group == "") && body.Parent != nil && *body.Parent != "" {
 			body.Group = body.Parent
 		}
 
-		if err := a.server.CreateOrUpdateRoom(body.ID, body.Permanent, body.Group, body.Order); err != nil {
-			http.Error(w, "failed to save room", http.StatusInternalServerError)
-			return
+		// Decide whether to update room metadata or only audio settings
+		metaProvided := body.Permanent != nil || body.Group != nil || body.Order != nil
+		if metaProvided {
+			permanent := false
+			group := ""
+			order := 0
+			if body.Permanent != nil {
+				permanent = *body.Permanent
+			}
+			if body.Group != nil {
+				group = *body.Group
+			}
+			if body.Order != nil {
+				order = *body.Order
+			}
+			if err := a.server.CreateOrUpdateRoom(body.ID, permanent, group, order); err != nil {
+				http.Error(w, "failed to save room", http.StatusInternalServerError)
+				return
+			}
 		}
-		if body.AudioCodec != "" || body.AudioQuality != 0 {
-			_ = a.server.UpdateRoomAudio(body.ID, body.AudioCodec, body.AudioQuality)
+		if body.AudioCodec != nil || body.AudioQuality != nil {
+			codec := ""
+			quality := 0
+			if body.AudioCodec != nil {
+				codec = *body.AudioCodec
+			}
+			if body.AudioQuality != nil {
+				quality = *body.AudioQuality
+			}
+			_ = a.server.UpdateRoomAudio(body.ID, codec, quality)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:

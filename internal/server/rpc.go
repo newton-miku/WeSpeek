@@ -358,12 +358,12 @@ func (s *Server) handleAdminDeleteRoom(_ *Client, params json.RawMessage) {
 
 func (s *Server) handleAdminUpdateRoom(c *Client, params json.RawMessage) {
 	var in struct {
-		Auth      string `json:"auth"`
-		ID        string `json:"id"`
-		Permanent bool   `json:"permanent"`
-		Order     int    `json:"order"`
-		AudioCodec string `json:"audioCodec"`
-		AudioQuality int  `json:"audioQuality"`
+		Auth         string  `json:"auth"`
+		ID           string  `json:"id"`
+		Permanent    *bool   `json:"permanent"`
+		Order        *int    `json:"order"`
+		AudioCodec   *string `json:"audioCodec"`
+		AudioQuality *int    `json:"audioQuality"`
 	}
 	if err := json.Unmarshal(params, &in); err != nil {
 		return
@@ -375,20 +375,24 @@ func (s *Server) handleAdminUpdateRoom(c *Client, params json.RawMessage) {
 
 	if r, ok := s.rooms.Load(in.ID); ok {
 		rm := r.(*room)
-		rm.permanent = in.Permanent
-		rm.order = in.Order
-		if in.AudioCodec != "" {
-			rm.audioCodec = in.AudioCodec
+		if in.Permanent != nil {
+			rm.permanent = *in.Permanent
 		}
-		if in.AudioQuality != 0 {
-			rm.audioQuality = in.AudioQuality
+		if in.Order != nil {
+			rm.order = *in.Order
+		}
+		if in.AudioCodec != nil && *in.AudioCodec != "" {
+			rm.audioCodec = *in.AudioCodec
+		}
+		if in.AudioQuality != nil && *in.AudioQuality != 0 {
+			rm.audioQuality = *in.AudioQuality
 		}
 		_ = s.roomService.SaveRoom(entity.Room{
 			ID:        rm.id,
 			Permanent: rm.permanent,
 			Order:     rm.order,
 			Group:     rm.group,
-			AudioCodec: rm.audioCodec,
+			AudioCodec:  rm.audioCodec,
 			AudioQuality: rm.audioQuality,
 		})
 		s.broadcastRoomsUpdate()
