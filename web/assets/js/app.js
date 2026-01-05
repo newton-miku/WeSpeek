@@ -501,7 +501,12 @@ function playAudioChunk(uid, arrayBuffer) {
                                 const plane = new Float32Array(frames);
                                 audioData.copyTo(plane, { planeIndex: 0 });
                                 audioData.close();
-                                const buf = audioCtx.createBuffer(1, plane.length, targetSampleRate);
+                                // Use the sample rate from the decoded audio data, not the target/recording rate
+                                let sr = audioData.sampleRate || 0;
+                                if (!sr || sr < 3000 || sr > 768000) {
+                                    sr = audioCtx.sampleRate || targetSampleRate || 48000;
+                                }
+                                const buf = audioCtx.createBuffer(1, plane.length, sr);
                                 buf.copyToChannel(plane, 0);
                                 const source = audioCtx.createBufferSource();
                                 source.buffer = buf;
@@ -528,7 +533,7 @@ function playAudioChunk(uid, arrayBuffer) {
                         },
                         error: (e) => console.error(e)
                     });
-                    dec.configure({ codec: 'opus', sampleRate: targetSampleRate, numberOfChannels: 1 });
+                    dec.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1 });
                     opusDecoders.set(uid, dec);
                 } catch (e) {
                     console.error(e);
@@ -2428,6 +2433,7 @@ function updateSpeakingLevels() {
     }
   });
   
+  let currentMicLevel = 0;
   if (outputAnalyser) {
     const buf2 = new Uint8Array(outputAnalyser.fftSize);
     outputAnalyser.getByteTimeDomainData(buf2);
@@ -2436,6 +2442,7 @@ function updateSpeakingLevels() {
       const v = Math.abs(buf2[i] - 128) / 128;
       if (v > peak2) peak2 = v;
     }
+    currentMicLevel = peak2;
     const selfEl = uidElementMap.get(myUid);
     if (selfEl) {
       // Local user: check inputDisabled
@@ -2465,6 +2472,10 @@ function updateSpeakingLevels() {
     if (masterVolSlider) {
         masterVolSlider.style.setProperty('--level-percent', `${pctM}%`);
     }
+  }
+
+  if (floatBtn) {
+    floatBtn.style.setProperty('--mic-level', Math.min(1, currentMicLevel * 3));
   }
 
   requestAnimationFrame(updateSpeakingLevels);
