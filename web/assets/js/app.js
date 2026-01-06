@@ -2224,6 +2224,15 @@ sendChatBtn.onclick = () => {
 
 function compressImage(file, maxSizeByte) {
   return new Promise((resolve, reject) => {
+    // If file is small enough and is a supported image type, skip compression to preserve quality/animation/metadata
+    if (file.size <= maxSizeByte && file.type.match(/image\/(jpeg|jpg|png|gif|webp)/i)) {
+        const reader = new FileReader();
+        reader.onload = e => resolve(e.target.result);
+        reader.onerror = e => reject(e);
+        reader.readAsDataURL(file);
+        return;
+    }
+
     const reader = new FileReader();
     reader.readAsDataURL(file);
     reader.onload = event => {
@@ -2296,7 +2305,8 @@ if (chatImgBtn && chatImgInput) {
     if (chatImgInput.files && chatImgInput.files[0]) {
       const file = chatImgInput.files[0];
       try {
-        const base64 = await compressImage(file, 1024 * 1024 * 1024); // Limit to 10MB
+        const maxFileSize = 10 * 1024 * 1024; // 10MB limit
+        const base64 = await compressImage(file, maxFileSize); 
         if (activeTab === 'public') {
           send({ method: 'chat.public', params: { uid: myUid, name: uidEl.value || '匿名', text: base64 } });
         } else {
