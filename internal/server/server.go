@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,91 @@ type Server struct {
 	// Config
 	StoreImagesAsFiles bool
 	AllowUploads       bool
+
+	startTime time.Time
+}
+
+func (s *Server) GetServerStats() ServerStats {
+	var stats ServerStats
+	stats.Rooms = []RoomStats{}
+
+	var totalPing int64
+	var totalQueue int
+	var pingCount int
+	var queueCount int
+
+	s.rooms.Range(func(key, value interface{}) bool {
+		r := value.(*room)
+		stats.RoomCount++
+
+		rs := RoomStats{
+			ID: r.id,
+		}
+		// If description is used as name
+		rs.Name = r.description
+
+		var roomTotalPing int64
+		var roomPingCount int
+
+		r.mu.RLock()
+		rs.PeerCount = len(r.peers)
+		for _, p := range r.peers {
+			stats.PeerCount++
+
+			// Ping
+			l := atomic.LoadInt64(&p.latency)
+			if l > 0 {
+				totalPing += l
+				pingCount++
+				roomTotalPing += l
+				roomPingCount++
+			}
+
+			// Queue
+			if p.getAudioQueueSize != nil {
+				totalQueue += p.getAudioQueueSize()
+				queueCount++
+			}
+
+			// Traffic
+			pSent := atomic.LoadUint64(&p.bytesSent)
+			pRecv := atomic.LoadUint64(&p.bytesReceived)
+
+			stats.TotalBytesSent += pSent
+			stats.TotalBytesReceived += pRecv
+			rs.BytesSent += pSent
+			rs.BytesReceived += pRecv
+
+			stats.TotalPacketsSent += atomic.LoadUint64(&p.packetsSent)
+			stats.TotalPacketsLost += atomic.LoadInt64(&p.sentPacketsLost)
+		}
+		r.mu.RUnlock()
+
+		if roomPingCount > 0 {
+			rs.AvgPing = float64(roomTotalPing) / float64(roomPingCount)
+		}
+		stats.Rooms = append(stats.Rooms, rs)
+
+		return true
+	})
+
+	if pingCount > 0 {
+		stats.AvgPing = float64(totalPing) / float64(pingCount)
+	}
+	if queueCount > 0 {
+		stats.AvgQueueSize = float64(totalQueue) / float64(queueCount)
+	}
+
+	// System Stats
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	stats.GoroutineCount = runtime.NumGoroutine()
+	stats.AllocMemory = memStats.Alloc
+	stats.TotalAllocMemory = memStats.TotalAlloc
+	stats.SysMemory = memStats.Sys
+	stats.Uptime = int64(time.Since(s.startTime).Seconds())
+
+	return stats
 }
 
 func New(s store.Store, fs repository.FileStore, storeImagesAsFiles bool, allowUploads bool) *Server {
@@ -42,6 +128,7 @@ func New(s store.Store, fs repository.FileStore, storeImagesAsFiles bool, allowU
 		fileStore:          fs,
 		StoreImagesAsFiles: storeImagesAsFiles,
 		AllowUploads:       allowUploads, // Default allow
+		startTime:          time.Now(),
 	}
 }
 

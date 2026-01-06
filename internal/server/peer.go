@@ -35,12 +35,18 @@ func (s *Server) newPeer(uid, name, ip string, rm *room, send func(interface{}))
 }
 
 func (p *peer) GetPeerStats() *UserStats {
+	queueSize := 0
+	if p.getAudioQueueSize != nil {
+		queueSize = p.getAudioQueueSize()
+	}
 	return &UserStats{
 		BytesReceived:   atomic.LoadUint64(&p.bytesReceived),
 		PacketsReceived: atomic.LoadUint64(&p.packetsReceived),
 		BytesSent:       atomic.LoadUint64(&p.bytesSent),
 		PacketsSent:     atomic.LoadUint64(&p.packetsSent),
 		SentPacketsLost: atomic.LoadInt64(&p.sentPacketsLost),
+		Latency:         atomic.LoadInt64(&p.latency),
+		QueueSize:       queueSize,
 	}
 }
 

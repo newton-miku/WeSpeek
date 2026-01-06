@@ -185,7 +185,7 @@ calibActionBtn.onclick = async () => {
     if (calibState === 'idle') {
         // Start Noise Recording
         if (!connected && !localStream) {
-            alert('请先加入房间或启用麦克风！');
+            alert('请先加入频道或启用麦克风！');
             return;
         }
         calibState = 'noise';
@@ -340,12 +340,12 @@ function mapQualityToSampleRate(q) {
     case 3: return 16000;
     case 4: return 24000;
     case 5: return 32000;
-    case 6: return 16000;
-    case 7: return 24000;
-    case 8: return 32000;
-    case 9: return 44100;
+    case 6: return 44100;
+    case 7: return 48000;
+    case 8: return 48000;
+    case 9: return 48000;
     case 10: return 48000;
-    default: return 16000;
+    default: return 44000;
   }
 }
 
@@ -401,6 +401,10 @@ function updateRoomAudioSettingsById(roomId) {
     try { opusEncoder && opusEncoder.close(); } catch {}
     opusEncoder = null;
     opusEncBuffer = [];
+    
+    // Clear Opus Decoders to free resources
+    opusDecoders.forEach(d => { try { d.close(); } catch {} });
+    opusDecoders.clear();
   }
   if (recorderProcessor) {
     stopAudioRecording();
@@ -414,7 +418,7 @@ function playAudioChunk(uid, arrayBuffer) {
         let buffer;
         if (currentCodec === 'opus') {
             let dec = opusDecoders.get(uid);
-            if (!dec) {
+            if (!dec || dec.state === 'closed') {
                 try {
                     dec = new AudioDecoder({
                         output: (audioData) => {
@@ -496,12 +500,23 @@ function playAudioChunk(uid, arrayBuffer) {
         
         // Jitter Buffer Logic (40ms)
         // If we ran dry (underrun) or just started, add a safety margin
-        // This prevents "machine gun" stuttering when packets arrive with jitter
         if (start < now) {
             start = now + 0.04;
         } else if (start > now + 2.0) {
             // Safety valve: If latency is too high (>2s), reset to avoid massive delay buildup
             start = now + 0.04;
+        }
+
+        // Apply slight fade in/out to prevent clicking (pop noise) at buffer boundaries
+        // Only if we have enough samples
+        if (buffer.length > 32) {
+            const data = buffer.getChannelData(0);
+            const fadeLen = 16; // 16 samples fade
+            for (let i = 0; i < fadeLen; i++) {
+                const gain = i / fadeLen;
+                data[i] *= gain; // Fade In
+                data[data.length - 1 - i] *= gain; // Fade Out
+            }
         }
 
         source.start(start);
@@ -860,7 +875,12 @@ function handleWsAudio(data) {
         
         // Resync logic: If gap is too large (> 500 packets ~ 20 seconds), assume stream reset/collision
         if (Math.abs(d) > 500) {
-             console.warn(`Resync audio stats for ${uid}: expected ${stats.expectedSeq}, got ${seq}, diff ${d}`);
+             if (seq === 0) {
+                 // Stream reset (normal behavior on reconnect/mic toggle), log as info
+                 console.log(`Stream reset for ${uid}: seq 0 (was ${stats.expectedSeq})`);
+             } else {
+                 console.warn(`Resync audio stats for ${uid}: expected ${stats.expectedSeq}, got ${seq}, diff ${d}`);
+             }
             stats.expectedSeq = (seq + 1) % 65536;
             bucket.received++;
             // Do not count as lost
@@ -1046,7 +1066,7 @@ function connectWS() {
     roomsTree.innerHTML = '';
     membersEl.innerHTML = '';
     curRoomEl.textContent = '未连接';
-    tabRoomBtn.textContent = '房间';
+    tabRoomBtn.textContent = '频道';
     sid = '';
     lastRoomsData = [];
     
@@ -1186,7 +1206,7 @@ leaveBtn.onclick = async () => {
   stopAudioRecording();
   try { localStream && localStream.getTracks().forEach(t => t.stop()); } catch {}
   curRoomEl.textContent = '未加入';
-  tabRoomBtn.textContent = '房间';
+  tabRoomBtn.textContent = '频道';
   sid = '';
   membersEl.innerHTML = '';
   connected = false;
@@ -1395,7 +1415,7 @@ function renderRoomsTree(data) {
       }});
 
       if (isAdmin()) {
-          menuItems.push({ text: '房间设置', action: () => openRoomSettingsModal(r) });
+          menuItems.push({ text: '频道设置', action: () => openRoomSettingsModal(r) });
           menuItems.push({ text: r.permanent ? '取消永久' : '设为永久', action: async () => {
           try {
             const headers = await getAdminHeaders();
@@ -1414,7 +1434,7 @@ function renderRoomsTree(data) {
               method: 'DELETE',
               headers: { ...headers }
             });
-            if (res.status === 409) alert('房间非空，无法删除');
+            if (res.status === 409) alert('频道非空，无法删除');
             refreshRooms();
           } catch {}
         }});
@@ -1780,6 +1800,9 @@ async function showUserDetails(uid, name) {
   
   let latestServerStats = extendedInfo ? extendedInfo.stats : null;
   let serverStatsHistory = [];
+  let lastStatsData = null;
+  let lastStatsTime = 0;
+
   window.onUserInfoUpdate = (params) => {
       if (params.uid === uid) {
           if (params.stats) latestServerStats = params.stats;
@@ -1910,11 +1933,31 @@ async function showUserDetails(uid, name) {
                 return b + ' B';
             };
 
+            // Rate Calculation
+            const now = Date.now();
+            let rxRate = 0;
+            let txRate = 0;
+
+            if (lastStatsData && lastStatsTime > 0) {
+                const dt = (now - lastStatsTime) / 1000;
+                if (dt > 0 && dt < 10) { // Reasonable time window
+                     if (rxBytes >= lastStatsData.bytesSent) {
+                         rxRate = (rxBytes - lastStatsData.bytesSent) / dt;
+                     }
+                     if (txBytes >= lastStatsData.bytesReceived) {
+                         txRate = (txBytes - lastStatsData.bytesReceived) / dt;
+                     }
+                }
+            }
+            lastStatsData = latestServerStats;
+            lastStatsTime = now;
+
             rows.push(createRow('接收', `${rx} pkts (${fmtBytes(rxBytes)})`));
+            rows.push(createRow('下载速率', `${fmtBytes(rxRate)}/s`));
             rows.push(createRow('发送', `${tx} pkts (${fmtBytes(txBytes)})`));
+            rows.push(createRow('上传速率', `${fmtBytes(txRate)}/s`));
             
             // Server Stats (1-min Window)
-            const now = Date.now();
             serverStatsHistory.push({ time: now, stats: latestServerStats });
             serverStatsHistory = serverStatsHistory.filter(x => x.time > now - 60000);
 
@@ -1962,7 +2005,7 @@ async function showUserDetails(uid, name) {
 
         content.innerHTML = createSection('连接统计', rows);
     } else {
-        content.innerHTML = '<div style="padding: 20px; text-align: center; color: #aaa;">用户未在线或不在房间中</div>';
+        content.innerHTML = '<div style="padding: 20px; text-align: center; color: #aaa;">用户未在线或不在频道中</div>';
     }
   };
 

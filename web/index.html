@@ -10,7 +10,7 @@
   <div class="layout">
     <aside class="panel sidebar">
       <header>
-        <h2>房间列表</h2>
+        <h2>频道列表</h2>
         <div id="serverName" class="server-name">WeSpeek 服务器</div>
       </header>
       <div class="rooms" id="roomsTree"></div>
@@ -19,7 +19,7 @@
       <header>
         <div class="row">
           <button id="menuBtn" class="icon-btn mobile-only">☰</button>
-          <div class="title">当前房间：<span id="curRoom">未加入</span></div>
+          <div class="title">当前频道：<span id="curRoom">未加入</span></div>
           <span id="connStatus" class="status warn">未连接</span>
         </div>
         <div class="controls">
@@ -33,14 +33,14 @@
       </header>
       <section class="grid">
         <section class="subpanel">
-          <h3>房间内成员</h3>
+          <h3>频道内成员</h3>
           <div id="members" class="list"></div>
         </section>
       <section class="subpanel">
         <h3>聊天</h3>
         <div class="tabs">
           <button class="tab active" id="tabPublic">大厅</button>
-          <button class="tab" id="tabRoom" style="display:none;">房间</button>
+          <button class="tab" id="tabRoom" style="display:none;">频道</button>
         </div>
         <div id="chatList" class="list"></div>
         <div class="row">
@@ -72,7 +72,7 @@
     </div>
     <div id="roomSettingsModal" class="modal" style="display:none;">
       <div class="modal-content" style="width:420px;">
-        <h3>房间设置</h3>
+        <h3>频道设置</h3>
         <div class="row">
           <label style="width:120px;">音频编码</label>
           <select id="roomCodec" style="flex:1;">

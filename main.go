@@ -64,6 +64,7 @@ func main() {
 	mux.HandleFunc("/api/admin/challenge", apiHandler.AdminChallengeHandler)
 	mux.HandleFunc("/api/admin/move_user", apiHandler.AdminMoveUserHandler)
 	mux.HandleFunc("/api/admin/setup", apiHandler.AdminSetupHandler)
+	mux.HandleFunc("/api/admin/status", apiHandler.AdminStatusHandler)
 	mux.HandleFunc("/api/groups", apiHandler.GroupsHandler)
 	mux.HandleFunc("/api/groups/", apiHandler.GroupsHandler)
 

@@ -30,6 +30,8 @@ type peer struct {
 	outputDisabled bool
 	latency        int64
 
+	getAudioQueueSize func() int
+
 	// Stats (atomic)
 	bytesReceived   uint64
 	packetsReceived uint64
@@ -54,19 +56,54 @@ type UserStats struct {
 	BytesSent       uint64 `json:"bytesSent"`
 	PacketsSent     uint64 `json:"packetsSent"`
 	SentPacketsLost int64  `json:"sentPacketsLost"`
+
+	Latency   int64 `json:"latency"`
+	QueueSize int   `json:"queueSize"`
+}
+
+type ServerStats struct {
+	PeerCount        int     `json:"peerCount"`
+	RoomCount        int     `json:"roomCount"`
+	AvgPing          float64 `json:"avgPing"`
+	AvgQueueSize     float64 `json:"avgQueueSize"`
+	TotalPacketsSent uint64  `json:"totalPacketsSent"`
+	TotalPacketsLost int64   `json:"totalPacketsLost"`
+
+	// Traffic Stats
+	TotalBytesSent     uint64 `json:"totalBytesSent"`
+	TotalBytesReceived uint64 `json:"totalBytesReceived"`
+
+	// Room Details
+	Rooms []RoomStats `json:"rooms"`
+
+	// System Stats
+	GoroutineCount   int    `json:"goroutineCount"`
+	AllocMemory      uint64 `json:"allocMemory"`      // Bytes allocated and not yet freed
+	TotalAllocMemory uint64 `json:"totalAllocMemory"` // Total bytes allocated (even if freed)
+	SysMemory        uint64 `json:"sysMemory"`        // Total memory obtained from OS
+	Uptime           int64  `json:"uptime"`           // Seconds
+}
+
+type RoomStats struct {
+	ID            string  `json:"id"`
+	Name          string  `json:"name,omitempty"`
+	PeerCount     int     `json:"peerCount"`
+	AvgPing       float64 `json:"avgPing"`
+	BytesSent     uint64  `json:"bytesSent"`
+	BytesReceived uint64  `json:"bytesReceived"`
 }
 
 type room struct {
-	mu          sync.RWMutex
-	id          string
-	group       string
-	description string
-	order       int
-	audioCodec  string
+	mu           sync.RWMutex
+	id           string
+	group        string
+	description  string
+	order        int
+	audioCodec   string
 	audioQuality int
-	peers       map[string]*peer
-	permanent   bool
-	deleteTimer *time.Timer
+	peers        map[string]*peer
+	permanent    bool
+	deleteTimer  *time.Timer
 }
 
 type memberInfo struct {
@@ -86,15 +123,15 @@ type ChatMessage struct {
 }
 
 type RoomInfo struct {
-	ID          string              `json:"id"`
-	Group       string              `json:"group"`
-	Description string              `json:"description"`
-	Order       int                 `json:"order"`
-	AudioCodec  string              `json:"audioCodec"`
-	AudioQuality int                `json:"audioQuality"`
-	Count       int                 `json:"count"`
-	Members     []RoomMemberSummary `json:"members"`
-	Permanent   bool                `json:"permanent"`
+	ID           string              `json:"id"`
+	Group        string              `json:"group"`
+	Description  string              `json:"description"`
+	Order        int                 `json:"order"`
+	AudioCodec   string              `json:"audioCodec"`
+	AudioQuality int                 `json:"audioQuality"`
+	Count        int                 `json:"count"`
+	Members      []RoomMemberSummary `json:"members"`
+	Permanent    bool                `json:"permanent"`
 }
 
 type RoomMemberSummary struct {

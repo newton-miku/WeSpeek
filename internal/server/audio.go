@@ -77,9 +77,14 @@ func (s *Server) AudioWSHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	p.getAudioQueueSize = func() int {
+		return len(sendCh)
+	}
+
 	defer func() {
 		// Cleanup
 		p.audioSend = nil
+		p.getAudioQueueSize = nil
 		mu.Lock()
 		closed = true
 		close(sendCh)

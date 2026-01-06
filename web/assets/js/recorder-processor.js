@@ -51,16 +51,38 @@ class RecorderProcessor extends AudioWorkletProcessor {
 
     processAndPost(inputData, outLength, ratio) {
         let sumSq = 0;
+        const isDownsampling = ratio > 1;
 
         if (this.outputFormat === 'pcmf32') {
             const f32 = new Float32Array(outLength);
             for (let i = 0; i < outLength; i++) {
-                const pos = i * ratio;
-                const idx = Math.floor(pos);
-                const frac = pos - idx;
-                const s0 = inputData[idx];
-                const s1 = inputData[idx + 1]; // Safe because of outLength calculation
-                let s = s0 + (s1 - s0) * frac;
+                let s;
+                if (isDownsampling) {
+                    // Downsampling: Average samples within the window to reduce aliasing
+                    const startOffset = i * ratio;
+                    const endOffset = (i + 1) * ratio;
+                    let startIdx = Math.floor(startOffset);
+                    let endIdx = Math.ceil(endOffset);
+                    // Clamp
+                    if (endIdx > inputData.length) endIdx = inputData.length;
+                    
+                    let sum = 0;
+                    let count = 0;
+                    for (let j = startIdx; j < endIdx; j++) {
+                        sum += inputData[j];
+                        count++;
+                    }
+                    s = count > 0 ? sum / count : 0;
+                } else {
+                    // Upsampling: Linear interpolation
+                    const pos = i * ratio;
+                    const idx = Math.floor(pos);
+                    const frac = pos - idx;
+                    const s0 = inputData[idx];
+                    const s1 = inputData[idx + 1] || s0;
+                    s = s0 + (s1 - s0) * frac;
+                }
+                
                 if (s > 1.0) s = 1.0;
                 if (s < -1.0) s = -1.0;
                 f32[i] = s;
@@ -70,12 +92,31 @@ class RecorderProcessor extends AudioWorkletProcessor {
         } else {
             const pcmData = new Int16Array(outLength);
             for (let i = 0; i < outLength; i++) {
-                const pos = i * ratio;
-                const idx = Math.floor(pos);
-                const frac = pos - idx;
-                const s0 = inputData[idx];
-                const s1 = inputData[idx + 1];
-                let s = s0 + (s1 - s0) * frac;
+                let s;
+                if (isDownsampling) {
+                    // Downsampling: Average samples within the window to reduce aliasing
+                    const startOffset = i * ratio;
+                    const endOffset = (i + 1) * ratio;
+                    let startIdx = Math.floor(startOffset);
+                    let endIdx = Math.ceil(endOffset);
+                    if (endIdx > inputData.length) endIdx = inputData.length;
+                    
+                    let sum = 0;
+                    let count = 0;
+                    for (let j = startIdx; j < endIdx; j++) {
+                        sum += inputData[j];
+                        count++;
+                    }
+                    s = count > 0 ? sum / count : 0;
+                } else {
+                    const pos = i * ratio;
+                    const idx = Math.floor(pos);
+                    const frac = pos - idx;
+                    const s0 = inputData[idx];
+                    const s1 = inputData[idx + 1] || s0;
+                    s = s0 + (s1 - s0) * frac;
+                }
+
                 if (s > 1.0) s = 1.0;
                 if (s < -1.0) s = -1.0;
                 const val = s < 0 ? s * 0x8000 : s * 0x7FFF;
@@ -88,8 +129,10 @@ class RecorderProcessor extends AudioWorkletProcessor {
 
     handleGateAndPost(data, meanSq) {
         const rms = Math.sqrt(meanSq);
-        if (rms > 0.02) {
-            this.gateHold = 10;
+        // Lower threshold to avoid cutting off soft speech tails, 
+        // relying on frontend VAD/Noise Gate instead.
+        if (rms > 0.005) {
+            this.gateHold = 20; // Increase hold time slightly
         }
         if (this.gateHold > 0) {
             this.gateHold--;

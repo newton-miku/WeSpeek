@@ -30,6 +30,17 @@ func (a *API) isAdmin(r *http.Request) bool {
 	return false
 }
 
+func (a *API) AdminStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	stats := a.server.GetServerStats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
 // Handlers
 
 func (a *API) RoomsHandler(w http.ResponseWriter, r *http.Request) {
