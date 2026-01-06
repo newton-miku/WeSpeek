@@ -5,6 +5,40 @@ class RecorderProcessor extends AudioWorkletProcessor {
         this.outputFormat = options.processorOptions.outputFormat || 'pcm16';
         this.remainder = new Float32Array(0);
         this.gateHold = 0;
+        this.nextPhase = 0;
+
+        // Buffering for PCM
+        this.bufferSize = 2048; 
+        this.bufferIdx = 0;
+        this.buffer = null;
+        this.bufferSumSq = 0;
+
+        // AGC State
+        this.agcGain = 1.0;
+        this.targetLevel = 0.15;
+        this.maxGain = 6.0;
+        this.enableAGC = options.processorOptions.enableAGC !== false;
+
+        this.port.onmessage = (e) => {
+            if (e.data) {
+                if (e.data.type === 'setAgc') {
+                    this.enableAGC = e.data.enabled;
+                } else if (e.data.type === 'setParams') {
+                    if (e.data.targetSampleRate) {
+                        this.targetSampleRate = e.data.targetSampleRate;
+                        // Reset resampling state on rate change to avoid glitches
+                        this.remainder = new Float32Array(0);
+                        this.nextPhase = 0;
+                    }
+                    if (e.data.outputFormat) {
+                        this.outputFormat = e.data.outputFormat;
+                        this.buffer = null;
+                        this.bufferIdx = 0;
+                        this.bufferSumSq = 0;
+                    }
+                }
+            }
+        };
     }
 
     process(inputs, outputs) {
@@ -13,6 +47,38 @@ class RecorderProcessor extends AudioWorkletProcessor {
         
         const channelData = input[0];
         if (!channelData || channelData.length === 0) return true;
+
+        // Apply AGC if enabled
+        if (this.enableAGC) {
+            let sumSq = 0;
+            for (let i = 0; i < channelData.length; i++) {
+                sumSq += channelData[i] * channelData[i];
+            }
+            const rms = Math.sqrt(sumSq / channelData.length);
+            
+            let targetGain = this.agcGain;
+            if (rms > 0.0001) {
+                targetGain = this.targetLevel / rms;
+            } else {
+                targetGain = 1.0;
+            }
+            
+            if (targetGain > this.maxGain) targetGain = this.maxGain;
+            
+            // Smoothing
+            let alpha = 0.005;
+            if (targetGain < this.agcGain) {
+                alpha = 0.15; // Fast release
+            } else {
+                alpha = 0.002; // Slow attack
+            }
+            
+            this.agcGain = this.agcGain * (1 - alpha) + targetGain * alpha;
+            
+            for (let i = 0; i < channelData.length; i++) {
+                channelData[i] *= this.agcGain;
+            }
+        }
 
         // Combine remainder from previous process call with new data
         const inputData = new Float32Array(this.remainder.length + channelData.length);
@@ -24,120 +90,149 @@ class RecorderProcessor extends AudioWorkletProcessor {
         const currentSampleRate = sampleRate;
         const ratio = currentSampleRate / this.targetSampleRate;
         
-        // Calculate how many output samples we can generate safely
-        // We need input index ceil(i * ratio) + 1 to exist
-        // i * ratio + 1 < inputData.length
-        // i * ratio < inputData.length - 1
-        // i < (inputData.length - 1) / ratio
-        const outLength = Math.floor((inputData.length - 1) / ratio);
-        
-        if (outLength > 0) {
-            this.processAndPost(inputData, outLength, ratio);
-            
-            // Calculate starting index for the next chunk
-            // The last used index was floor((outLength - 1) * ratio) + 1 (for interpolation)
-            // But actually we just need to keep data starting from where the NEXT output would start.
-            // Next output index is outLength.
-            // Next input position is outLength * ratio.
-            // So we need input data starting from floor(outLength * ratio).
-            const nextInputIdx = Math.floor(outLength * ratio);
-            this.remainder = inputData.slice(nextInputIdx);
+        // Strategy:
+        // If ratio > 2.0, use Averaging (Boxcar) to avoid severe aliasing from decimation.
+        // If ratio <= 2.0 (Upsampling or slight Downsampling), use Cubic Interpolation for quality.
+        const useCubic = ratio <= 2.0;
+
+        let outLength = 0;
+        if (useCubic) {
+             // Cubic needs p0(i-1), p1(i), p2(i+1), p3(i+2)
+             // We need floor(pos) + 2 < inputData.length
+             // floor(pos) <= inputData.length - 3
+             // pos < inputData.length - 2
+             // (outLength-1)*ratio + phase < inputData.length - 2
+             outLength = Math.floor((inputData.length - 2 - this.nextPhase) / ratio) + 1;
         } else {
+             // Averaging needs window end
+             outLength = Math.floor((inputData.length - this.nextPhase) / ratio);
+        }
+
+        if (outLength > 0) {
+            this.processAndPost(inputData, outLength, ratio, useCubic);
+            
+            // Update phase and remainder
+            const nextInputPos = outLength * ratio + this.nextPhase;
+            const consumed = Math.floor(nextInputPos);
+            
+            this.nextPhase = nextInputPos - consumed;
+            
+            // For Cubic, we need history (p0). 
+            // So we shouldn't discard everything up to `consumed`.
+            // We need to keep at least 1 sample BEFORE the new start.
+            // Let's keep 2 samples before just to be safe and simple.
+            // new remainder start index = consumed - 2
+            
+            let keepIdx = consumed - 2;
+            if (keepIdx < 0) keepIdx = 0;
+
+            // Adjust nextPhase to be relative to the new remainder start
+            // phase was relative to inputData[0]
+            // new remainder starts at inputData[keepIdx]
+            // so new phase = (nextInputPos) - keepIdx
+            // = (consumed + fractional) - keepIdx
+            // = (consumed - keepIdx) + fractional
+            this.nextPhase += (consumed - keepIdx);
+
+            if (keepIdx < inputData.length) {
+                this.remainder = inputData.slice(keepIdx);
+            } else {
+                this.remainder = new Float32Array(0);
+                this.nextPhase = 0; 
+            }
+        } else {
+            // Not enough data, keep everything
+            // But we need to limit buffer growth if something is wrong?
+            // Usually ok.
             this.remainder = inputData;
         }
 
         return true;
     }
 
-    processAndPost(inputData, outLength, ratio) {
-        let sumSq = 0;
-        const isDownsampling = ratio > 1;
+    processAndPost(inputData, outLength, ratio, useCubic) {
+        if (!this.buffer) {
+             this.buffer = this.outputFormat === 'pcmf32' ? new Float32Array(this.bufferSize) : new Int16Array(this.bufferSize);
+        }
+        
+        const isFloat = this.outputFormat === 'pcmf32';
 
-        if (this.outputFormat === 'pcmf32') {
-            const f32 = new Float32Array(outLength);
-            for (let i = 0; i < outLength; i++) {
-                let s;
-                if (isDownsampling) {
-                    // Downsampling: Average samples within the window to reduce aliasing
-                    const startOffset = i * ratio;
-                    const endOffset = (i + 1) * ratio;
-                    let startIdx = Math.floor(startOffset);
-                    let endIdx = Math.ceil(endOffset);
-                    // Clamp
-                    if (endIdx > inputData.length) endIdx = inputData.length;
-                    
-                    let sum = 0;
-                    let count = 0;
-                    for (let j = startIdx; j < endIdx; j++) {
-                        sum += inputData[j];
-                        count++;
-                    }
-                    s = count > 0 ? sum / count : 0;
-                } else {
-                    // Upsampling: Linear interpolation
-                    const pos = i * ratio;
-                    const idx = Math.floor(pos);
-                    const frac = pos - idx;
-                    const s0 = inputData[idx];
-                    const s1 = inputData[idx + 1] || s0;
-                    s = s0 + (s1 - s0) * frac;
-                }
+        for (let i = 0; i < outLength; i++) {
+            let s;
+            if (useCubic) {
+                const pos = i * ratio + this.nextPhase;
+                const idx = Math.floor(pos);
+                const frac = pos - idx;
                 
-                if (s > 1.0) s = 1.0;
-                if (s < -1.0) s = -1.0;
-                f32[i] = s;
-                sumSq += s * s;
-            }
-            this.handleGateAndPost(f32, sumSq / outLength);
-        } else {
-            const pcmData = new Int16Array(outLength);
-            for (let i = 0; i < outLength; i++) {
-                let s;
-                if (isDownsampling) {
-                    // Downsampling: Average samples within the window to reduce aliasing
-                    const startOffset = i * ratio;
-                    const endOffset = (i + 1) * ratio;
-                    let startIdx = Math.floor(startOffset);
-                    let endIdx = Math.ceil(endOffset);
-                    if (endIdx > inputData.length) endIdx = inputData.length;
-                    
-                    let sum = 0;
-                    let count = 0;
-                    for (let j = startIdx; j < endIdx; j++) {
-                        sum += inputData[j];
-                        count++;
-                    }
-                    s = count > 0 ? sum / count : 0;
-                } else {
-                    const pos = i * ratio;
-                    const idx = Math.floor(pos);
-                    const frac = pos - idx;
-                    const s0 = inputData[idx];
-                    const s1 = inputData[idx + 1] || s0;
-                    s = s0 + (s1 - s0) * frac;
-                }
+                const p1 = inputData[idx];
+                const p0 = idx > 0 ? inputData[idx - 1] : p1;
+                const p2 = idx + 1 < inputData.length ? inputData[idx + 1] : p1;
+                const p3 = idx + 2 < inputData.length ? inputData[idx + 2] : p2;
 
-                if (s > 1.0) s = 1.0;
-                if (s < -1.0) s = -1.0;
-                const val = s < 0 ? s * 0x8000 : s * 0x7FFF;
-                pcmData[i] = val;
-                sumSq += s * s;
+                const t = frac;
+                const t2 = t * t;
+                const t3 = t * t2;
+                
+                s = 0.5 * ( (2 * p1) + 
+                            (-p0 + p2) * t + 
+                            (2*p0 - 5*p1 + 4*p2 - p3) * t2 + 
+                            (-p0 + 3*p1 - 3*p2 + p3) * t3 );
+            } else {
+                const startOffset = i * ratio + this.nextPhase;
+                const endOffset = (i + 1) * ratio + this.nextPhase;
+                let startIdx = Math.floor(startOffset);
+                let endIdx = Math.ceil(endOffset);
+                if (endIdx > inputData.length) endIdx = inputData.length;
+                
+                let sum = 0;
+                let count = 0;
+                for (let j = startIdx; j < endIdx; j++) {
+                    sum += inputData[j];
+                    count++;
+                }
+                s = count > 0 ? sum / count : 0;
             }
-            this.handleGateAndPost(pcmData, sumSq / outLength);
+            
+            if (s > 1.0) s = 1.0;
+            if (s < -1.0) s = -1.0;
+            
+            if (isFloat) {
+                this.buffer[this.bufferIdx] = s;
+                this.bufferSumSq += s * s;
+            } else {
+                const val = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                this.buffer[this.bufferIdx] = val;
+                this.bufferSumSq += s * s;
+            }
+            
+            this.bufferIdx++;
+            
+            if (this.bufferIdx >= this.bufferSize) {
+                this.handleGateAndPost();
+            }
         }
     }
 
-    handleGateAndPost(data, meanSq) {
-        const rms = Math.sqrt(meanSq);
-        // Lower threshold to avoid cutting off soft speech tails, 
-        // relying on frontend VAD/Noise Gate instead.
+    handleGateAndPost() {
+        const rms = Math.sqrt(this.bufferSumSq / this.bufferSize);
         if (rms > 0.005) {
-            this.gateHold = 20; // Increase hold time slightly
+            this.gateHold = 6; // Approx 250ms hold
         }
+        
         if (this.gateHold > 0) {
             this.gateHold--;
-            this.port.postMessage(data.buffer, [data.buffer]);
+            const sendBuffer = this.buffer;
+            
+            // Reallocate buffer
+            this.buffer = this.outputFormat === 'pcmf32' ? new Float32Array(this.bufferSize) : new Int16Array(this.bufferSize);
+            
+            this.port.postMessage(sendBuffer.buffer, [sendBuffer.buffer]);
+        } else {
+            // Silence, just reuse buffer (reset index)
         }
+        
+        this.bufferIdx = 0;
+        this.bufferSumSq = 0;
     }
 }
 

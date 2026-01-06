@@ -291,7 +291,7 @@ function getOrCreateUserAudioNodes(uid) {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (!masterGainNode) {
     masterGainNode = audioCtx.createGain();
-    masterGainNode.gain.value = masterVolSlider.value / 100;
+    masterGainNode.gain.value = outputDisabled ? 0 : (masterVolSlider.value / 100);
     
     // Master Analyser for Output Visualization
     masterAnalyser = audioCtx.createAnalyser();
@@ -361,6 +361,15 @@ function updateRoomAudioSettingsById(roomId) {
   currentQuality = r.audioQuality || 6;
   targetSampleRate = mapQualityToSampleRate(currentQuality);
   effectiveCodec = ((currentCodec === 'pcmf32' || currentCodec === 'opus') ? 'pcmf32' : 'pcm16');
+  
+  if (recorderProcessor) {
+      recorderProcessor.port.postMessage({
+          type: 'setParams',
+          targetSampleRate: targetSampleRate,
+          outputFormat: effectiveCodec
+      });
+  }
+
   if (currentCodec === 'opus') {
     try {
       if (opusEncoder) { try { opusEncoder.close(); } catch {} }
@@ -387,7 +396,19 @@ function updateRoomAudioSettingsById(roomId) {
         },
         error: (e) => console.error(e)
       });
-      opusEncoder.configure({ codec: 'opus', sampleRate: targetSampleRate, numberOfChannels: 1 });
+      opusEncoder.configure({
+        codec: 'opus',
+        sampleRate: targetSampleRate,
+        numberOfChannels: 1,
+        bitrate: 32000, // Explicit bitrate to ensure enough bandwidth for FEC
+        opus: {
+          frameDuration: 20000, // 20ms
+          signal: 'voice',
+          application: 'voip',
+          packetlossperc: 15, // Tell encoder to expect 15% packet loss
+          useinbandfec: true  // Enable In-Band Forward Error Correction
+        }
+      });
       opusEncBuffer = [];
       opusEncTimestamp = 0;
     } catch (e) {
@@ -1105,6 +1126,9 @@ async function joinRoom(targetId) {
       connected = false;
     }
     
+    sid = targetId || sid || 'default';
+    updateRoomAudioSettingsById(sid);
+
     // Check MediaDevices support
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('浏览器不支持音频设备访问 (可能是浏览器不支持或服务器配置有误)');
@@ -1160,9 +1184,6 @@ async function joinRoom(targetId) {
         }, 5000);
       });
     }
-
-    sid = targetId || sid || 'default';
-    updateRoomAudioSettingsById(sid);
     
     let displayName = sid;
     const r = lastRoomsData.find(x => x.id === sid);
@@ -2439,6 +2460,7 @@ enumerateMics();
 refreshRooms();
 
 function playNotification(type) {
+  if (outputDisabled) return;
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const osc = audioCtx.createOscillator();
@@ -2575,7 +2597,7 @@ inputGainSlider.oninput = (e) => {
   showSliderBubble(inputGainSlider, inputGainSlider.value + '%');
 };
 masterVolSlider.oninput = (e) => {
-  if (masterGainNode) masterGainNode.gain.value = masterVolSlider.value / 100;
+  if (masterGainNode) masterGainNode.gain.value = outputDisabled ? 0 : (masterVolSlider.value / 100);
   LSW('ws.masterVol', masterVolSlider.value);
   updateSliderFill(masterVolSlider);
   showSliderBubble(masterVolSlider, masterVolSlider.value + '%');
