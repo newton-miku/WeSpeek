@@ -20,10 +20,12 @@ func (s *Server) GetRoomsSnapshot() []RoomInfo {
 			rmIDs = append(rmIDs, RoomMemberSummary{
 				UID:            uid,
 				Name:           p.name,
+				Role:           p.role,
 				InputDisabled:  p.inputDisabled,
 				OutputDisabled: p.outputDisabled,
 				Latency:        atomic.LoadInt64(&p.latency),
 				JoinTime:       p.joinTime.Unix(),
+				Webrtc:         p.webrtc,
 			})
 		}
 		rm.mu.RUnlock()
@@ -133,6 +135,7 @@ func (s *Server) GetRoomMembers(id string) ([]RoomMemberSummary, error) {
 		ids = append(ids, RoomMemberSummary{
 			UID:            uid,
 			Name:           p.name,
+			Role:           p.role,
 			InputDisabled:  p.inputDisabled,
 			OutputDisabled: p.outputDisabled,
 			Latency:        atomic.LoadInt64(&p.latency),
@@ -160,7 +163,15 @@ func (s *Server) broadcastRoomUpdate(rm *room) {
 	rm.mu.RLock()
 	members := make([]memberInfo, 0, len(rm.peers))
 	for uid, p := range rm.peers {
-		members = append(members, memberInfo{UID: uid, Name: p.name, InputDisabled: p.inputDisabled, OutputDisabled: p.outputDisabled, Latency: atomic.LoadInt64(&p.latency)})
+		members = append(members, memberInfo{
+			UID:            uid,
+			Name:           p.name,
+			Role:           p.role,
+			InputDisabled:  p.inputDisabled,
+			OutputDisabled: p.outputDisabled,
+			Latency:        atomic.LoadInt64(&p.latency),
+			Webrtc:         p.webrtc,
+		})
 	}
 	rm.mu.RUnlock()
 	sort.Slice(members, func(i, j int) bool {

@@ -85,11 +85,29 @@ func main() {
 	addr := util.EnvOr("WSPEEK_ADDR", ":7000")
 	s := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           CORSMiddleware(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Println("listening on", addr)
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func CORSMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow all origins for development convenience.
+		// For production, you might want to restrict this.
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-Admin-Auth")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }

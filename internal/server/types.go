@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"sync"
 	"time"
+
+	"github.com/pion/webrtc/v3"
 )
 
 type joinParams struct {
-	SID  string `json:"sid"`
-	UID  string `json:"uid"`
-	Name string `json:"name"`
+	SID    string `json:"sid"`
+	UID    string `json:"uid"`
+	Name   string `json:"name"`
+	Webrtc bool   `json:"webrtc"`
 }
 
 type rpcMessage struct {
@@ -22,6 +25,7 @@ type peer struct {
 	uid            string
 	name           string
 	ip             string
+	role           string // "user", "admin", "owner"
 	room           *room
 	joinTime       time.Time
 	send           func(interface{})
@@ -29,6 +33,8 @@ type peer struct {
 	inputDisabled  bool
 	outputDisabled bool
 	latency        int64
+	webrtc         bool
+	grantedSecret  string // Secret granted to this peer (if any) during this session
 
 	getAudioQueueSize func() int
 
@@ -38,6 +44,9 @@ type peer struct {
 	bytesSent       uint64
 	packetsSent     uint64
 	sentPacketsLost int64
+
+	// SFU
+	sfuPC *webrtc.PeerConnection
 }
 
 type adminUserInfoResponse struct {
@@ -104,14 +113,17 @@ type room struct {
 	peers        map[string]*peer
 	permanent    bool
 	deleteTimer  *time.Timer
+	sfuTracks    map[string]*webrtc.TrackLocalStaticRTP
 }
 
 type memberInfo struct {
 	UID            string `json:"uid"`
 	Name           string `json:"name"`
+	Role           string `json:"role"`
 	InputDisabled  bool   `json:"inputDisabled"`
 	OutputDisabled bool   `json:"outputDisabled"`
 	Latency        int64  `json:"latency"`
+	Webrtc         bool   `json:"webrtc"`
 }
 
 type ChatMessage struct {
@@ -137,10 +149,12 @@ type RoomInfo struct {
 type RoomMemberSummary struct {
 	UID            string `json:"uid"`
 	Name           string `json:"name"`
+	Role           string `json:"role"`
 	InputDisabled  bool   `json:"inputDisabled"`
 	OutputDisabled bool   `json:"outputDisabled"`
 	Latency        int64  `json:"latency"`
 	JoinTime       int64  `json:"joinTime"`
+	Webrtc         bool   `json:"webrtc"`
 }
 
 type roomsUpdateParams struct {

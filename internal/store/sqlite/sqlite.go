@@ -52,6 +52,7 @@ func (s *SqliteStore) init() error {
 		`CREATE TABLE IF NOT EXISTS admin_secrets (
 			secret TEXT PRIMARY KEY,
 			description TEXT,
+			role TEXT DEFAULT 'admin',
 			created_at INTEGER
 		);`,
 		`CREATE TABLE IF NOT EXISTS chat_messages (
@@ -77,6 +78,7 @@ func (s *SqliteStore) init() error {
 	}
 	_, _ = s.db.Exec(`ALTER TABLE rooms ADD COLUMN audio_codec TEXT`)
 	_, _ = s.db.Exec(`ALTER TABLE rooms ADD COLUMN audio_quality INTEGER`)
+	_, _ = s.db.Exec(`ALTER TABLE admin_secrets ADD COLUMN role TEXT DEFAULT 'admin'`)
 	return nil
 }
 
@@ -193,26 +195,32 @@ func (s *SqliteStore) DeleteGroup(name string) error {
 	return err
 }
 
-func (s *SqliteStore) GetAdminSecrets() ([]string, error) {
-	rows, err := s.db.Query("SELECT secret FROM admin_secrets")
+func (s *SqliteStore) GetAdminSecrets() ([]entity.AdminIdentity, error) {
+	rows, err := s.db.Query("SELECT secret, description, role, created_at FROM admin_secrets")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var secrets []string
+	var secrets []entity.AdminIdentity
 	for rows.Next() {
-		var secret string
-		if err := rows.Scan(&secret); err != nil {
+		var r entity.AdminIdentity
+		var role sql.NullString
+		if err := rows.Scan(&r.Secret, &r.Description, &role, &r.CreatedAt); err != nil {
 			return nil, err
 		}
-		secrets = append(secrets, secret)
+		if role.Valid {
+			r.Role = entity.AdminRole(role.String)
+		} else {
+			r.Role = entity.RoleAdmin // Default
+		}
+		secrets = append(secrets, r)
 	}
 	return secrets, nil
 }
 
-func (s *SqliteStore) AddAdminSecret(secret, description string) error {
-	_, err := s.db.Exec("INSERT OR IGNORE INTO admin_secrets (secret, description, created_at) VALUES (?, ?, strftime('%s', 'now'))", secret, description)
+func (s *SqliteStore) AddAdminSecret(secret, description string, role entity.AdminRole) error {
+	_, err := s.db.Exec("INSERT OR IGNORE INTO admin_secrets (secret, description, role, created_at) VALUES (?, ?, ?, strftime('%s', 'now'))", secret, description, role)
 	return err
 }
 
@@ -325,7 +333,7 @@ func (s *SqliteStore) DecFileRef(path string) (int64, error) {
 	// but single UPDATE with RETURNING is atomic in SQLite.
 	// Note: RETURNING clause is available in newer SQLite versions (3.35.0+, 2021).
 	// modernc.org/sqlite supports it.
-	
+
 	var newCount int64
 	err := s.db.QueryRow(`
 		UPDATE file_refs 
@@ -333,7 +341,7 @@ func (s *SqliteStore) DecFileRef(path string) (int64, error) {
 		WHERE path = ?
 		RETURNING ref_count
 	`, path).Scan(&newCount)
-	
+
 	if err == sql.ErrNoRows {
 		// Path not found, maybe legacy data or already deleted. Treat as 0.
 		return 0, nil
@@ -341,11 +349,11 @@ func (s *SqliteStore) DecFileRef(path string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	
+
 	if newCount <= 0 {
 		_, _ = s.db.Exec("DELETE FROM file_refs WHERE path = ?", path)
 		return 0, nil
 	}
-	
+
 	return newCount, nil
 }

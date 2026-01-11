@@ -8,13 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/newton-miku/WeSpeek/internal/domain/entity"
 	"github.com/newton-miku/WeSpeek/internal/domain/repository"
 	"github.com/newton-miku/WeSpeek/internal/util"
 )
 
 type AdminService struct {
 	repo            repository.AdminRepository
-	adminSecrets    sync.Map // map[string]struct{}
+	adminSecrets    sync.Map // map[string]entity.AdminIdentity
 	adminChallenges sync.Map // map[string]int64 (nonce -> expiry)
 	adminOTT        string
 	adminMu         sync.Mutex
@@ -27,7 +28,7 @@ func NewAdminService(repo repository.AdminRepository) *AdminService {
 	// Load secrets
 	secrets, _ := repo.GetAdminSecrets()
 	for _, sec := range secrets {
-		s.adminSecrets.Store(sec, struct{}{})
+		s.adminSecrets.Store(sec.Secret, sec)
 	}
 	return s
 }
@@ -39,10 +40,10 @@ func (s *AdminService) CreateAdminChallenge() (string, int64) {
 	return nonce, exp
 }
 
-func (s *AdminService) VerifyAdmin(nonce, macHex string) bool {
+func (s *AdminService) VerifyAdmin(nonce, macHex string) (bool, entity.AdminRole) {
 	// 1. Check if it's a direct secret (backwards compatibility / simple auth)
-	if _, ok := s.adminSecrets.Load(nonce); ok {
-		return true
+	if val, ok := s.adminSecrets.Load(nonce); ok {
+		return true, val.(entity.AdminIdentity).Role
 	}
 
 	// 2. Check OTT
@@ -50,45 +51,56 @@ func (s *AdminService) VerifyAdmin(nonce, macHex string) bool {
 	ott := s.adminOTT
 	s.adminMu.Unlock()
 	if ott != "" && nonce == ott {
-		return true
+		return true, entity.RoleOwner
 	}
 
 	// 3. HMAC Verification
 	v, ok := s.adminChallenges.Load(nonce)
 	if !ok {
-		return false
+		return false, ""
 	}
 	exp := v.(int64)
 	if time.Now().Unix() > exp {
 		s.adminChallenges.Delete(nonce)
-		return false
+		return false, ""
 	}
 
-	verified := false
-	s.adminSecrets.Range(func(key, _ interface{}) bool {
+	var verifiedRole entity.AdminRole
+	s.adminSecrets.Range(func(key, val interface{}) bool {
 		secret := key.(string)
 		mac := hmac.New(sha256.New, []byte(secret))
 		_, _ = mac.Write([]byte(nonce))
 		sum := mac.Sum(nil)
 		if strings.EqualFold(hex.EncodeToString(sum), macHex) {
-			verified = true
+			verifiedRole = val.(entity.AdminIdentity).Role
 			return false // stop iteration
 		}
 		return true
 	})
 
-	if verified {
+	if verifiedRole != "" {
 		// s.adminChallenges.Delete(nonce) // reuse allowed within window
-		return true
+		return true, verifiedRole
 	}
-	return false
+	return false, ""
 }
 
-func (s *AdminService) CreateLoginSecret(desc string) (string, error) {
+func (s *AdminService) CreateLoginSecret(desc string, role entity.AdminRole) (string, error) {
 	secret := util.RandStringLen(32)
-	s.adminSecrets.Store(secret, struct{}{})
-	err := s.repo.AddAdminSecret(secret, desc)
+	id := entity.AdminIdentity{
+		Secret:      secret,
+		Description: desc,
+		Role:        role,
+		CreatedAt:   time.Now().Unix(),
+	}
+	s.adminSecrets.Store(secret, id)
+	err := s.repo.AddAdminSecret(secret, desc, role)
 	return secret, err
+}
+
+func (s *AdminService) RevokeLoginSecret(secret string) error {
+	s.adminSecrets.Delete(secret)
+	return s.repo.DeleteAdminSecret(secret)
 }
 
 func (s *AdminService) GetOTT() string {
@@ -123,14 +135,20 @@ func (s *AdminService) VerifyAdminSetup(token string) (string, error) {
 		return "", repository.ErrNotFound // Or standard error
 	}
 
-	// Generate a new unique secret for this user
+	// Generate a new unique secret for this user (Owner role)
 	newSecret := util.RandStringLen(32)
+	id := entity.AdminIdentity{
+		Secret:      newSecret,
+		Description: "Setup via Link",
+		Role:        entity.RoleOwner,
+		CreatedAt:   time.Now().Unix(),
+	}
 	// Store in DB
-	if err := s.repo.AddAdminSecret(newSecret, "Setup via Link"); err != nil {
+	if err := s.repo.AddAdminSecret(newSecret, id.Description, id.Role); err != nil {
 		return "", err
 	}
 	// Update memory
-	s.adminSecrets.Store(newSecret, struct{}{})
+	s.adminSecrets.Store(newSecret, id)
 
 	// Invalidate the OTT
 	s.adminOTT = ""

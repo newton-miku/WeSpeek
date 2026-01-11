@@ -8,13 +8,15 @@ import (
 	"github.com/newton-miku/WeSpeek/internal/util"
 )
 
-func (s *Server) newPeer(uid, name, ip string, rm *room, send func(interface{})) *peer {
+func (s *Server) newPeer(uid, name, ip string, rm *room, webrtc bool, send func(interface{})) *peer {
 	me := &peer{
 		server:   s,
 		uid:      uid,
 		name:     name,
 		ip:       ip,
+		role:     "user",
 		room:     rm,
+		webrtc:   webrtc,
 		send:     send,
 		joinTime: time.Now(),
 	}
@@ -51,6 +53,8 @@ func (p *peer) GetPeerStats() *UserStats {
 }
 
 func (p *peer) close() {
+	p.server.cleanupSFU(p)
+
 	p.room.mu.Lock()
 	delete(p.room.peers, p.uid)
 	p.room.mu.Unlock()

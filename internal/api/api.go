@@ -24,7 +24,9 @@ func (a *API) isAdmin(r *http.Request) bool {
 	if auth := r.Header.Get("X-Admin-Auth"); auth != "" {
 		parts := strings.Split(auth, ":")
 		if len(parts) == 2 {
-			return a.server.VerifyAdmin(parts[0], parts[1])
+			if ok, _ := a.server.VerifyAdmin(parts[0], parts[1]); ok {
+				return true
+			}
 		}
 	}
 	return false

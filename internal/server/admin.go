@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 
+	"github.com/newton-miku/WeSpeek/internal/domain/entity"
 	"github.com/newton-miku/WeSpeek/internal/store"
 )
 
@@ -27,7 +28,7 @@ func (s *Server) CreateAdminChallenge() (string, int64) {
 	return s.adminService.CreateAdminChallenge()
 }
 
-func (s *Server) VerifyAdmin(nonce, macHex string) bool {
+func (s *Server) VerifyAdmin(nonce, macHex string) (bool, entity.AdminRole) {
 	return s.adminService.VerifyAdmin(nonce, macHex)
 }
 

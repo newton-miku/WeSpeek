@@ -37,7 +37,7 @@ type ChatRepository interface {
 }
 
 type AdminRepository interface {
-	GetAdminSecrets() ([]string, error)
-	AddAdminSecret(secret, description string) error
+	GetAdminSecrets() ([]entity.AdminIdentity, error)
+	AddAdminSecret(secret, description string, role entity.AdminRole) error
 	DeleteAdminSecret(secret string) error
 }

@@ -10,21 +10,23 @@ import (
 )
 
 type Client struct {
-	server   *Server
-	conn     *websocket.Conn
-	msgCh    chan interface{}
-	peer     *peer
-	id       string
-	remoteIP string
+	server       *Server
+	conn         *websocket.Conn
+	msgCh        chan interface{}
+	peer         *peer
+	id           string
+	remoteIP     string
+	lastPongTime int64
 }
 
 func (s *Server) newClient(conn *websocket.Conn, id, ip string) *Client {
 	return &Client{
-		server:   s,
-		conn:     conn,
-		msgCh:    make(chan interface{}, 256),
-		id:       id,
-		remoteIP: ip,
+		server:       s,
+		conn:         conn,
+		msgCh:        make(chan interface{}, 256),
+		id:           id,
+		remoteIP:     ip,
+		lastPongTime: time.Now().UnixNano(),
 	}
 }
 
@@ -51,6 +53,13 @@ func (c *Client) writeLoop() {
 			// Send ping with current timestamp
 			now := time.Now().UnixNano()
 			_ = c.conn.WriteControl(websocket.PingMessage, []byte(fmt.Sprintf("%d", now)), time.Now().Add(time.Second))
+
+			// Send Application Level Ping (JSON) for clients that don't support Control Frames (e.g. some Web clients)
+			_ = c.conn.SetWriteDeadline(time.Now().Add(time.Second))
+			_ = c.conn.WriteJSON(struct {
+				Method string `json:"method"`
+				Params int64  `json:"params"`
+			}{Method: "ping", Params: now})
 		}
 	}
 }
@@ -67,6 +76,7 @@ func (c *Client) readLoop() {
 	}()
 
 	c.conn.SetPongHandler(func(appData string) error {
+		atomic.StoreInt64(&c.lastPongTime, time.Now().UnixNano())
 		if c.peer != nil {
 			var sentTime int64
 			fmt.Sscanf(appData, "%d", &sentTime)

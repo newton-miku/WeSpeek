@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/newton-miku/WeSpeek/internal/domain/entity"
@@ -46,10 +47,58 @@ func (s *Server) dispatchRPC(c *Client, m rpcMessage) {
 		s.handleAdminCreateGroup(c, m.Params)
 	case "admin.delete_group":
 		s.handleAdminDeleteGroup(c, m.Params)
+	case "admin.grant":
+		s.handleAdminGrant(c, m.Params)
+	case "admin.revoke":
+		s.handleAdminRevoke(c, m.Params)
 	case "latency.subscribe":
 		s.handleLatencySubscribe(c)
 	case "latency.unsubscribe":
 		s.handleLatencyUnsubscribe(c)
+	case "signal":
+		s.handleSignal(c, m.Params)
+	case "peer.update":
+		s.handlePeerUpdate(c, m.Params)
+	case "pong":
+		s.handlePong(c, m.Params)
+	}
+}
+
+func (s *Server) handlePong(c *Client, params json.RawMessage) {
+	atomic.StoreInt64(&c.lastPongTime, time.Now().UnixNano())
+	var sentTime int64
+	if err := json.Unmarshal(params, &sentTime); err != nil {
+		return
+	}
+	if sentTime > 0 && c.peer != nil {
+		rtt := (time.Now().UnixNano() - sentTime) / 1e6 // ms
+		atomic.StoreInt64(&c.peer.latency, rtt)
+	}
+}
+
+type peerUpdateParams struct {
+	Webrtc *bool `json:"webrtc"`
+}
+
+func (s *Server) handlePeerUpdate(c *Client, params json.RawMessage) {
+	if c.peer == nil {
+		return
+	}
+	var prm peerUpdateParams
+	if err := json.Unmarshal(params, &prm); err != nil {
+		return
+	}
+
+	changed := false
+	if prm.Webrtc != nil {
+		if c.peer.webrtc != *prm.Webrtc {
+			c.peer.webrtc = *prm.Webrtc
+			changed = true
+		}
+	}
+
+	if changed {
+		s.broadcastRoomUpdate(c.peer.room)
 	}
 }
 
@@ -117,7 +166,7 @@ func (s *Server) handleJoin(c *Client, params json.RawMessage) {
 	ip := c.remoteIP
 
 	// Create peer and link to client
-	c.peer = s.newPeer(prm.UID, name, ip, rm, func(v interface{}) {
+	c.peer = s.newPeer(prm.UID, name, ip, rm, prm.Webrtc, func(v interface{}) {
 		select {
 		case c.msgCh <- v:
 		default:
@@ -263,6 +312,115 @@ func (s *Server) handleName(c *Client, params json.RawMessage) {
 	s.broadcastRoomsUpdate()
 }
 
+func (s *Server) handleAdminGrant(_ *Client, params json.RawMessage) {
+	var in struct {
+		Auth string `json:"auth"`
+		UID  string `json:"uid"`
+	}
+	if err := json.Unmarshal(params, &in); err != nil {
+		return
+	}
+	parts := strings.Split(in.Auth, ":")
+	if len(parts) != 2 {
+		return
+	}
+	ok, role := s.VerifyAdmin(parts[0], parts[1])
+	// Only Owner can grant admin
+	if !ok || role != entity.RoleOwner {
+		return
+	}
+
+	// Generate new secret (Admin role)
+	secret, err := s.adminService.CreateLoginSecret("Granted to "+in.UID, entity.RoleAdmin)
+	if err != nil {
+		return
+	}
+
+	// Find target peer and send secret
+	var targetPeer *peer
+	s.rooms.Range(func(key, value interface{}) bool {
+		r := value.(*room)
+		r.mu.RLock()
+		if p, ok := r.peers[in.UID]; ok {
+			targetPeer = p
+			r.mu.RUnlock()
+			return false
+		}
+		r.mu.RUnlock()
+		return true
+	})
+
+	if targetPeer != nil {
+		targetPeer.grantedSecret = secret // Store for revocation
+		targetPeer.role = string(entity.RoleAdmin)
+		s.broadcastRoomUpdate(targetPeer.room)
+		targetPeer.send(struct {
+			Method string `json:"method"`
+			Params struct {
+				Secret string `json:"secret"`
+				Role   string `json:"role"`
+			} `json:"params"`
+		}{
+			Method: "admin.granted",
+			Params: struct {
+				Secret string `json:"secret"`
+				Role   string `json:"role"`
+			}{Secret: secret, Role: string(entity.RoleAdmin)},
+		})
+	}
+}
+
+func (s *Server) handleAdminRevoke(_ *Client, params json.RawMessage) {
+	var in struct {
+		Auth string `json:"auth"`
+		UID  string `json:"uid"`
+	}
+	if err := json.Unmarshal(params, &in); err != nil {
+		return
+	}
+	parts := strings.Split(in.Auth, ":")
+	if len(parts) != 2 {
+		return
+	}
+	ok, role := s.VerifyAdmin(parts[0], parts[1])
+	// Only Owner can revoke
+	if !ok || role != entity.RoleOwner {
+		return
+	}
+
+	// Find target peer
+	var targetPeer *peer
+	s.rooms.Range(func(key, value interface{}) bool {
+		r := value.(*room)
+		r.mu.RLock()
+		if p, ok := r.peers[in.UID]; ok {
+			targetPeer = p
+			r.mu.RUnlock()
+			return false
+		}
+		r.mu.RUnlock()
+		return true
+	})
+
+	if targetPeer != nil {
+		// Revoke the secret if we know it
+		if targetPeer.grantedSecret != "" {
+			_ = s.adminService.RevokeLoginSecret(targetPeer.grantedSecret)
+			targetPeer.grantedSecret = ""
+		}
+
+		targetPeer.role = "user"
+		s.broadcastRoomUpdate(targetPeer.room)
+
+		// Also notify the user to clear their local storage
+		targetPeer.send(struct {
+			Method string `json:"method"`
+		}{
+			Method: "admin.revoked",
+		})
+	}
+}
+
 func (s *Server) handleChatRevoke(c *Client, params json.RawMessage) {
 	var in struct {
 		MsgID int64  `json:"msgId"`
@@ -281,8 +439,10 @@ func (s *Server) handleChatRevoke(c *Client, params json.RawMessage) {
 	isAdmin := false
 	if in.Auth != "" {
 		parts := strings.Split(in.Auth, ":")
-		if len(parts) == 2 && s.VerifyAdmin(parts[0], parts[1]) {
-			isAdmin = true
+		if len(parts) == 2 {
+			if ok, _ := s.VerifyAdmin(parts[0], parts[1]); ok {
+				isAdmin = true
+			}
 		}
 	}
 
@@ -382,7 +542,7 @@ func (s *Server) handleAdminGetUserInfo(c *Client, params json.RawMessage) {
 	if in.Auth != "" {
 		parts := strings.Split(in.Auth, ":")
 		if len(parts) == 2 {
-			isAdmin = s.VerifyAdmin(parts[0], parts[1])
+			isAdmin, _ = s.VerifyAdmin(parts[0], parts[1])
 		}
 	}
 
@@ -425,19 +585,26 @@ func (s *Server) handleAdminLogin(c *Client, params json.RawMessage) {
 		return
 	}
 	if in.Password == util.EnvOr("ADMIN_PASSWORD", "admin") {
-		secret, err := s.adminService.CreateLoginSecret("admin login")
+		secret, err := s.adminService.CreateLoginSecret("admin login", entity.RoleOwner)
 		if err != nil {
 			return
+		}
+
+		if c.peer != nil {
+			c.peer.role = string(entity.RoleOwner)
+			s.broadcastRoomUpdate(c.peer.room)
 		}
 
 		c.msgCh <- struct {
 			Method string `json:"method"`
 			Params struct {
 				Secret string `json:"secret"`
+				Role   string `json:"role"`
 			} `json:"params"`
 		}{Method: "admin.login", Params: struct {
 			Secret string `json:"secret"`
-		}{Secret: secret}}
+			Role   string `json:"role"`
+		}{Secret: secret, Role: string(entity.RoleOwner)}}
 	}
 }
 
@@ -450,7 +617,10 @@ func (s *Server) handleAdminDeleteRoom(_ *Client, params json.RawMessage) {
 		return
 	}
 	parts := strings.Split(in.Auth, ":")
-	if len(parts) != 2 || !s.VerifyAdmin(parts[0], parts[1]) {
+	if len(parts) != 2 {
+		return
+	}
+	if ok, _ := s.VerifyAdmin(parts[0], parts[1]); !ok {
 		return
 	}
 
@@ -468,7 +638,7 @@ func (s *Server) handleAdminDeleteRoom(_ *Client, params json.RawMessage) {
 	}
 }
 
-func (s *Server) handleAdminUpdateRoom(c *Client, params json.RawMessage) {
+func (s *Server) handleAdminUpdateRoom(_ *Client, params json.RawMessage) {
 	var in struct {
 		Auth         string  `json:"auth"`
 		ID           string  `json:"id"`
@@ -481,7 +651,10 @@ func (s *Server) handleAdminUpdateRoom(c *Client, params json.RawMessage) {
 		return
 	}
 	parts := strings.Split(in.Auth, ":")
-	if len(parts) != 2 || !s.VerifyAdmin(parts[0], parts[1]) {
+	if len(parts) != 2 {
+		return
+	}
+	if ok, _ := s.VerifyAdmin(parts[0], parts[1]); !ok {
 		return
 	}
 
@@ -511,7 +684,7 @@ func (s *Server) handleAdminUpdateRoom(c *Client, params json.RawMessage) {
 	}
 }
 
-func (s *Server) handleAdminKick(c *Client, params json.RawMessage) {
+func (s *Server) handleAdminKick(_ *Client, params json.RawMessage) {
 	var in struct {
 		Auth string `json:"auth"`
 		UID  string `json:"uid"`
@@ -520,7 +693,10 @@ func (s *Server) handleAdminKick(c *Client, params json.RawMessage) {
 		return
 	}
 	parts := strings.Split(in.Auth, ":")
-	if len(parts) != 2 || !s.VerifyAdmin(parts[0], parts[1]) {
+	if len(parts) != 2 {
+		return
+	}
+	if ok, _ := s.VerifyAdmin(parts[0], parts[1]); !ok {
 		return
 	}
 
@@ -543,7 +719,7 @@ func (s *Server) handleAdminKick(c *Client, params json.RawMessage) {
 	}
 }
 
-func (s *Server) handleAdminMute(c *Client, params json.RawMessage) {
+func (s *Server) handleAdminMute(_ *Client, params json.RawMessage) {
 	var in struct {
 		Auth string `json:"auth"`
 		UID  string `json:"uid"`
@@ -553,7 +729,10 @@ func (s *Server) handleAdminMute(c *Client, params json.RawMessage) {
 		return
 	}
 	parts := strings.Split(in.Auth, ":")
-	if len(parts) != 2 || !s.VerifyAdmin(parts[0], parts[1]) {
+	if len(parts) != 2 {
+		return
+	}
+	if ok, _ := s.VerifyAdmin(parts[0], parts[1]); !ok {
 		return
 	}
 
@@ -577,7 +756,7 @@ func (s *Server) handleAdminMute(c *Client, params json.RawMessage) {
 	}
 }
 
-func (s *Server) handleAdminCreateGroup(c *Client, params json.RawMessage) {
+func (s *Server) handleAdminCreateGroup(_ *Client, params json.RawMessage) {
 	var in struct {
 		Auth string `json:"auth"`
 		Name string `json:"name"`
@@ -586,7 +765,10 @@ func (s *Server) handleAdminCreateGroup(c *Client, params json.RawMessage) {
 		return
 	}
 	parts := strings.Split(in.Auth, ":")
-	if len(parts) != 2 || !s.VerifyAdmin(parts[0], parts[1]) {
+	if len(parts) != 2 {
+		return
+	}
+	if ok, _ := s.VerifyAdmin(parts[0], parts[1]); !ok {
 		return
 	}
 
@@ -595,7 +777,7 @@ func (s *Server) handleAdminCreateGroup(c *Client, params json.RawMessage) {
 	s.broadcastRoomsUpdate()
 }
 
-func (s *Server) handleAdminDeleteGroup(c *Client, params json.RawMessage) {
+func (s *Server) handleAdminDeleteGroup(_ *Client, params json.RawMessage) {
 	var in struct {
 		Auth string `json:"auth"`
 		Name string `json:"name"`
@@ -604,7 +786,10 @@ func (s *Server) handleAdminDeleteGroup(c *Client, params json.RawMessage) {
 		return
 	}
 	parts := strings.Split(in.Auth, ":")
-	if len(parts) != 2 || !s.VerifyAdmin(parts[0], parts[1]) {
+	if len(parts) != 2 {
+		return
+	}
+	if ok, _ := s.VerifyAdmin(parts[0], parts[1]); !ok {
 		return
 	}
 
