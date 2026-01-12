@@ -43,8 +43,42 @@ if (-not (Test-Path $DistDir)) {
     New-Item -ItemType Directory -Path $DistDir | Out-Null
 }
 
-# 3. Create Portable Zip
-Write-Host "2. Creating Portable Zip..." -ForegroundColor Yellow
+# 3. Add VC++ Redistributable DLLs to Portable Version
+Write-Host "2. Adding VC++ Redistributable DLLs..." -ForegroundColor Yellow
+
+# List of required VC++ DLLs
+$vcDlls = @(
+    "MSVCP140.dll",
+    "MSVCP140_1.dll",
+    "MSVCP140_2.dll",
+    "VCRUNTIME140.dll",
+    "VCRUNTIME140_1.dll"
+)
+
+# Source directories for VC++ DLLs
+$system32Dir = "C:\Windows\System32"
+$sysWoW64Dir = "C:\Windows\SysWOW64"
+
+foreach ($dll in $vcDlls) {
+    # Try to find the DLL in System32 first
+    $sourcePath = Join-Path $system32Dir $dll
+    if (-not (Test-Path $sourcePath)) {
+        # Try SysWOW64 if not found in System32
+        $sourcePath = Join-Path $sysWoW64Dir $dll
+    }
+    
+    $destPath = Join-Path $BuildDir $dll
+    
+    if (Test-Path $sourcePath) {
+        Copy-Item -Path $sourcePath -Destination $destPath -Force
+        Write-Host "Added $dll to portable build" -ForegroundColor Green
+    } else {
+        Write-Warning "Could not find $dll. Portable version may require VC++ Redistributable to be installed."
+    }
+}
+
+# 4. Create Portable Zip
+Write-Host "3. Creating Portable Zip..." -ForegroundColor Yellow
 $ZipName = "$DistDir\${AppName}_Portable_v${Version}.zip"
 if (Test-Path $ZipName) { Remove-Item $ZipName }
 
@@ -52,7 +86,7 @@ Compress-Archive -Path "$BuildDir\*" -DestinationPath $ZipName
 Write-Host "Portable version created: $ZipName" -ForegroundColor Green
 
 # 4. Check/Download Language Files
-Write-Host "3. Checking Language Files..." -ForegroundColor Yellow
+Write-Host "4. Checking Language Files..." -ForegroundColor Yellow
 $LangDir = Join-Path $ProjectRoot "installers\Languages"
 $LangFile = Join-Path $LangDir "ChineseSimplified.isl"
 $LangUrl = "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
@@ -73,7 +107,7 @@ if (-not (Test-Path $LangFile)) {
 }
 
 # 5. Download Visual C++ Redistributable
-Write-Host "4. Downloading Visual C++ Redistributable..." -ForegroundColor Yellow
+Write-Host "5. Downloading Visual C++ Redistributable..." -ForegroundColor Yellow
 $VcRedistUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 $VcRedistPath = Join-Path $ProjectRoot "installers\vc_redist.x64.exe"
 
@@ -88,7 +122,7 @@ if (-not (Test-Path $VcRedistPath)) {
 }
 
 # 6. Create Installer (if Inno Setup is available)
-Write-Host "5. Checking for Inno Setup..." -ForegroundColor Yellow
+Write-Host "6. Checking for Inno Setup..." -ForegroundColor Yellow
 
 $InnoPath = ""
 $PossiblePaths = @(

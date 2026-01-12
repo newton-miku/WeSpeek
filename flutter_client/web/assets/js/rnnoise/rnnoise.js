@@ -487,4 +487,6 @@ run();
 }
 );
 })();
-export default createRNNWasmModule;
+
+// Make createRNNWasmModule available globally
+window.createRNNWasmModule = createRNNWasmModule;
