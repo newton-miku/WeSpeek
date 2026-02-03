@@ -31,7 +31,7 @@ func (s *Server) newClient(conn *websocket.Conn, id, ip string) *Client {
 }
 
 func (c *Client) writeLoop() {
-	pingTicker := time.NewTicker(5 * time.Second)
+	pingTicker := time.NewTicker(3 * time.Second)
 	defer pingTicker.Stop()
 	defer c.conn.Close()
 
@@ -93,12 +93,12 @@ func (c *Client) readLoop() {
 		if err != nil {
 			return
 		}
+
+		// In pure WebRTC mode, binary messages are not used for audio
+		// All media is transmitted via WebRTC PeerConnection
+		// We only accept JSON messages for signaling
 		if mt == websocket.BinaryMessage {
-			if c.peer != nil {
-				atomic.AddUint64(&c.peer.bytesReceived, uint64(len(data)))
-				atomic.AddUint64(&c.peer.packetsReceived, 1)
-				c.peer.broadcastBinary(data)
-			}
+			// Binary messages are not expected in pure WebRTC mode
 			continue
 		}
 

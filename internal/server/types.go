@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"sync"
 	"time"
-
-	"github.com/pion/webrtc/v3"
 )
 
 type joinParams struct {
@@ -29,14 +27,14 @@ type peer struct {
 	room           *room
 	joinTime       time.Time
 	send           func(interface{})
-	audioSend      func([]byte)
 	inputDisabled  bool
 	outputDisabled bool
 	latency        int64
 	webrtc         bool
 	grantedSecret  string // Secret granted to this peer (if any) during this session
 
-	getAudioQueueSize func() int
+	// ION-SFU
+	sfuPeerID string // ion-sfu peer ID
 
 	// Stats (atomic)
 	bytesReceived   uint64
@@ -44,9 +42,6 @@ type peer struct {
 	bytesSent       uint64
 	packetsSent     uint64
 	sentPacketsLost int64
-
-	// SFU
-	sfuPC *webrtc.PeerConnection
 }
 
 type adminUserInfoResponse struct {
@@ -113,7 +108,6 @@ type room struct {
 	peers        map[string]*peer
 	permanent    bool
 	deleteTimer  *time.Timer
-	sfuTracks    map[string]*webrtc.TrackLocalStaticRTP
 }
 
 type memberInfo struct {

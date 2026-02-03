@@ -321,6 +321,24 @@ class WindowsAudioPlayer {
     }
   }
 
+  // 支持的采样率列表（按优先级排序）
+  static const List<int> _supportedSampleRates = [
+    48000,
+    44100,
+    32000,
+    24000,
+    22050,
+    16000,
+    12000,
+    11025,
+    8000,
+  ];
+
+  // 实际使用的采样率（回退后）
+  int _actualSampleRate = 48000;
+
+  int get actualSampleRate => _actualSampleRate;
+
   Future<void> init({int sampleRate = 16000, int channels = 1}) async {
     if (!Platform.isWindows) return;
     if (_isInitialized) return;
@@ -331,10 +349,43 @@ class WindowsAudioPlayer {
     _loadNativeFunctions();
 
     try {
-      await _initWaveOut(sampleRate, channels);
+      // 尝试初始化，如果失败则回退
+      _actualSampleRate = await _initWithFallback(sampleRate, channels);
       _isInitialized = true;
+      _logger.i('WindowsAudioPlayer initialized at $_actualSampleRate Hz, $_channels ch');
     } catch (e) {
-      // print('WindowsAudioPlayer init error: $e');
+      _logger.e('WindowsAudioPlayer init error: $e');
+    }
+  }
+
+  // 尝试打开指定采样率，失败则回退到设备支持的采样率
+  Future<int> _initWithFallback(int requestedRate, int channels) async {
+    // 首先尝试请求的采样率
+    try {
+      await _initWaveOut(requestedRate, channels);
+      return requestedRate;
+    } catch (e) {
+      _logger.w('Sample rate $requestedRate not supported, trying fallback...');
+    }
+
+    // 尝试其他支持的采样率
+    for (final rate in _supportedSampleRates) {
+      if (rate == requestedRate) continue;
+      try {
+        await _initWaveOut(rate, channels);
+        _logger.i('Fallback to sample rate: $rate Hz');
+        return rate;
+      } catch (e) {
+        // 继续尝试下一个
+      }
+    }
+
+    // 最后尝试 16000（最低要求）
+    try {
+      await _initWaveOut(16000, channels);
+      return 16000;
+    } catch (e) {
+      throw Exception('No supported sample rate found');
     }
   }
 

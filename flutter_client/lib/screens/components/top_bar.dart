@@ -21,9 +21,9 @@ class TopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Select specific properties to avoid unnecessary rebuilds (e.g. on speaking status change)
-    final (isInCall, currentRoomId, isScreenSharing) = context
-        .select<CallProvider, (bool, String, bool)>(
-          (p) => (p.isInCall, p.currentRoomId, p.isScreenSharing),
+    final (isInCall, currentRoomId, isScreenSharing, canShareScreen) = context
+        .select<CallProvider, (bool, String, bool, bool)>(
+          (p) => (p.isInCall, p.currentRoomId, p.isScreenSharing, p.canShareScreen),
         );
 
     // We need the provider for callbacks
@@ -73,39 +73,45 @@ class TopBar extends StatelessWidget {
           ],
           const Spacer(),
 
-          // Screen Share Button
+          // Screen Share Button - Always show when in call, but disable if WebRTC not supported
           if (isInCall) ...[
             IconButton(
               icon: Icon(
                 isScreenSharing ? Icons.stop_screen_share : Icons.screen_share,
               ),
-              color: isScreenSharing ? AppColors.accent : AppColors.textPrimary,
-              onPressed: () async {
-                final provider = context.read<CallProvider>();
-                if (isScreenSharing) {
-                  provider.stopScreenShare();
-                } else {
-                  String? sourceId;
-                  bool shareAudio = false;
-                  if (!kIsWeb &&
-                      (defaultTargetPlatform == TargetPlatform.windows ||
-                          defaultTargetPlatform == TargetPlatform.linux ||
-                          defaultTargetPlatform == TargetPlatform.macOS)) {
-                    final result = await showDialog<Map<String, dynamic>>(
-                      context: context,
-                      builder: (context) => const ScreenSelectDialog(),
-                    );
-                    if (result == null) return; // User cancelled
-                    sourceId = result['sourceId'];
-                    shareAudio = result['shareAudio'] ?? false;
-                  }
-                  provider.startScreenShare(
-                    sourceId: sourceId,
-                    shareAudio: shareAudio,
-                  );
-                }
-              },
-              tooltip: isScreenSharing ? "停止共享" : "屏幕共享",
+              color: isScreenSharing
+                  ? AppColors.accent
+                  : (canShareScreen ? AppColors.textPrimary : AppColors.textTertiary),
+              onPressed: canShareScreen
+                  ? () async {
+                      final provider = context.read<CallProvider>();
+                      if (isScreenSharing) {
+                        provider.stopScreenShare();
+                      } else {
+                        String? sourceId;
+                        bool shareAudio = false;
+                        if (!kIsWeb &&
+                            (defaultTargetPlatform == TargetPlatform.windows ||
+                                defaultTargetPlatform == TargetPlatform.linux ||
+                                defaultTargetPlatform == TargetPlatform.macOS)) {
+                          final result = await showDialog<Map<String, dynamic>>(
+                            context: context,
+                            builder: (context) => const ScreenSelectDialog(),
+                          );
+                          if (result == null) return; // User cancelled
+                          sourceId = result['sourceId'];
+                          shareAudio = result['shareAudio'] ?? false;
+                        }
+                        provider.startScreenShare(
+                          sourceId: sourceId,
+                          shareAudio: shareAudio,
+                        );
+                      }
+                    }
+                  : null,
+              tooltip: isScreenSharing
+                  ? "停止共享"
+                  : (canShareScreen ? "屏幕共享" : "屏幕共享（需要 WebRTC 支持）"),
             ),
             const SizedBox(width: 8),
           ],

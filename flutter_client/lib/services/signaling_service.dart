@@ -13,7 +13,7 @@ abstract class SignalingClient {
   void subscribe();
   void subscribeLatency();
   void unsubscribeLatency();
-  void join(String roomId, String uid, String name);
+  void join(String roomId, String uid, String name, {bool useWebRTC = true});
   void leave();
   void sendPublicChat(String uid, String name, String text);
   void sendRoomChat(String roomId, String uid, String name, String text);
@@ -27,6 +27,16 @@ abstract class SignalingClient {
   void adminRevoke(String uid, String key);
   void sendRevoke(String uid, int msgId, {String? auth});
   void sendSignal(String target, String type, dynamic payload);
+  void sendSFUSignal(String type, dynamic payload, {String? track});
+
+  // 屏幕共享方法
+  void startScreenShare();
+  void stopScreenShare();
+
+  // 静音控制
+  void mute(bool muted);
+  void unmute(bool unmuted);
+
   void close();
 }
 
@@ -107,14 +117,14 @@ class SignalingService implements SignalingClient {
   }
 
   @override
-  void join(String roomId, String uid, String name) {
+  void join(String roomId, String uid, String name, {bool useWebRTC = true}) {
     _send({
       "method": "join",
       "params": {
         "sid": roomId,
         "uid": uid,
         "name": name,
-        "webrtc": true, // Enable WebRTC support flag
+        "webrtc": useWebRTC, // 根据客户端能力设置
       },
     });
   }
@@ -132,6 +142,19 @@ class SignalingService implements SignalingClient {
         "target": target,
         "type": type,
         "payload": payload,
+      },
+    });
+  }
+
+  // SFU signaling for pure WebRTC mode
+  @override
+  void sendSFUSignal(String type, dynamic payload, {String? track}) {
+    _send({
+      "method": "sfu.signal",
+      "params": {
+        "type": type,
+        "payload": payload,
+        if (track != null) "track": track,
       },
     });
   }
@@ -250,5 +273,31 @@ class SignalingService implements SignalingClient {
   void close() {
     _channel?.sink.close();
     _channel = null;
+  }
+
+  // 新增方法实现
+
+  @override
+  void startScreenShare() {
+    _send({"method": "screen-share-start"});
+  }
+
+  @override
+  void stopScreenShare() {
+    _send({"method": "screen-share-stop"});
+  }
+
+  @override
+  void mute(bool muted) {
+    _send({
+      "method": "mute",
+    });
+  }
+
+  @override
+  void unmute(bool unmuted) {
+    _send({
+      "method": "unmute",
+    });
   }
 }

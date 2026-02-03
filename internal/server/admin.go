@@ -2,6 +2,8 @@ package server
 
 import (
 	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/newton-miku/WeSpeek/internal/domain/entity"
 	"github.com/newton-miku/WeSpeek/internal/store"
@@ -30,6 +32,19 @@ func (s *Server) CreateAdminChallenge() (string, int64) {
 
 func (s *Server) VerifyAdmin(nonce, macHex string) (bool, entity.AdminRole) {
 	return s.adminService.VerifyAdmin(nonce, macHex)
+}
+
+// isAdmin checks if the request is from an admin user
+func (s *Server) isAdmin(r *http.Request) bool {
+	if auth := r.Header.Get("X-Admin-Auth"); auth != "" {
+		parts := strings.Split(auth, ":")
+		if len(parts) == 2 {
+			if ok, _ := s.VerifyAdmin(parts[0], parts[1]); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) MoveUser(uid, targetRoomID string) error {

@@ -19,6 +19,7 @@ class _AudioSettingsDialogState extends State<AudioSettingsDialog> {
   late String noiseMode;
   late bool closeToTray;
   late double gateThreshold;
+  late int audioQuality; // 1=16k, 2=64k, 3=128k, 4=192k
 
   // Calibration State
   double _currentLevel = 0.0;
@@ -37,6 +38,7 @@ class _AudioSettingsDialogState extends State<AudioSettingsDialog> {
     noiseMode = widget.provider.noiseMode;
     closeToTray = widget.provider.closeToTray;
     gateThreshold = widget.provider.gateThreshold;
+    audioQuality = widget.provider.audioQuality;
 
     _volumeSub = widget.provider.onVolume?.listen((vol) {
       if (!mounted) return;
@@ -244,6 +246,37 @@ class _AudioSettingsDialogState extends State<AudioSettingsDialog> {
               ],
             ),
             const SizedBox(height: 16),
+            // Audio Quality Selector
+            Row(
+              children: [
+                const Text("音频质量"),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: DropdownButtonFormField<int>(
+                    initialValue: audioQuality,
+                    items: const [
+                      DropdownMenuItem(value: 1, child: Text("16kbps (省流量)")),
+                      DropdownMenuItem(value: 2, child: Text("64kbps (标准)")),
+                      DropdownMenuItem(value: 3, child: Text("128kbps (高清)")),
+                      DropdownMenuItem(value: 4, child: Text("192kbps (超高)")),
+                    ],
+                    onChanged: (v) {
+                      if (v != null) {
+                        setState(() => audioQuality = v);
+                      }
+                    },
+                    decoration: const InputDecoration(
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 0,
+                      ),
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
             if (noiseMode == "gate") ...[
               const Text(
                 "噪音门限阈值 (自动/手动)",
@@ -363,6 +396,7 @@ class _AudioSettingsDialogState extends State<AudioSettingsDialog> {
               widget.provider.setGateThreshold(gateThreshold);
             }
             widget.provider.setCloseToTray(closeToTray);
+            widget.provider.setAudioQuality(audioQuality);
             Navigator.pop(context);
           },
           child: const Text("保存"),

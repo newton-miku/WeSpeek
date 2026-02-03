@@ -1,58 +1,21 @@
-package api
+package server
 
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 
-	"github.com/newton-miku/WeSpeek/internal/server"
 	"github.com/newton-miku/WeSpeek/internal/store"
 )
 
-type API struct {
-	server *server.Server
-}
-
-func New(s *server.Server) *API {
-	return &API{server: s}
-}
-
-// Admin Helpers
-
-func (a *API) isAdmin(r *http.Request) bool {
-	// Prefer HMAC auth: X-Admin-Auth: nonce:macHex
-	if auth := r.Header.Get("X-Admin-Auth"); auth != "" {
-		parts := strings.Split(auth, ":")
-		if len(parts) == 2 {
-			if ok, _ := a.server.VerifyAdmin(parts[0], parts[1]); ok {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (a *API) AdminStatusHandler(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdmin(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	stats := a.server.GetServerStats()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
-}
-
-// Handlers
-
-func (a *API) RoomsHandler(w http.ResponseWriter, r *http.Request) {
+// RoomsHandler handles room listing and creation
+func (s *Server) RoomsHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		list := a.server.GetRoomsSnapshot()
+		list := s.GetRoomsSnapshot()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
-		if !a.isAdmin(r) {
+		if !s.isAdmin(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -73,7 +36,6 @@ func (a *API) RoomsHandler(w http.ResponseWriter, r *http.Request) {
 			body.Group = body.Parent
 		}
 
-		// Decide whether to update room metadata or only audio settings
 		metaProvided := body.Permanent != nil || body.Group != nil || body.Order != nil
 		if metaProvided {
 			permanent := false
@@ -88,7 +50,7 @@ func (a *API) RoomsHandler(w http.ResponseWriter, r *http.Request) {
 			if body.Order != nil {
 				order = *body.Order
 			}
-			if err := a.server.CreateOrUpdateRoom(body.ID, permanent, group, order); err != nil {
+			if err := s.CreateOrUpdateRoom(body.ID, permanent, group, order); err != nil {
 				http.Error(w, "failed to save room", http.StatusInternalServerError)
 				return
 			}
@@ -102,7 +64,7 @@ func (a *API) RoomsHandler(w http.ResponseWriter, r *http.Request) {
 			if body.AudioQuality != nil {
 				quality = *body.AudioQuality
 			}
-			_ = a.server.UpdateRoomAudio(body.ID, codec, quality)
+			_ = s.UpdateRoomAudio(body.ID, codec, quality)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
@@ -110,33 +72,34 @@ func (a *API) RoomsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *API) RoomMembersHandler(w http.ResponseWriter, r *http.Request) {
+// RoomMembersHandler handles room member listing
+func (s *Server) RoomMembersHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Path[len("/api/rooms/"):]
 	switch r.Method {
 	case http.MethodGet:
-		members, err := a.server.GetRoomMembers(id)
+		members, err := s.GetRoomMembers(id)
 		type resp struct {
-			ID      string                     `json:"id"`
-			Members []server.RoomMemberSummary `json:"members"`
+			ID      string           `json:"id"`
+			Members []RoomMemberSummary `json:"members"`
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err == store.ErrNotFound {
-			_ = json.NewEncoder(w).Encode(resp{ID: id, Members: []server.RoomMemberSummary{}})
+			_ = json.NewEncoder(w).Encode(resp{ID: id, Members: []RoomMemberSummary{}})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(resp{ID: id, Members: members})
 	case http.MethodDelete:
-		if !a.isAdmin(r) {
+		if !s.isAdmin(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		err := a.server.DeleteRoom(id)
+		err := s.DeleteRoom(id)
 		if err == store.ErrNotEmpty {
 			http.Error(w, "room not empty", http.StatusConflict)
 			return
 		}
 		if err != nil {
-			// Ignore other errors (e.g. not found)
+			// Ignore other errors
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
@@ -144,13 +107,14 @@ func (a *API) RoomMembersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *API) GroupsHandler(w http.ResponseWriter, r *http.Request) {
+// GroupsHandler handles group listing and creation
+func (s *Server) GroupsHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(a.server.GetGroupsSnapshot())
+		_ = json.NewEncoder(w).Encode(s.GetGroupsSnapshot())
 	case http.MethodPost:
-		if !a.isAdmin(r) {
+		if !s.isAdmin(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -162,19 +126,19 @@ func (a *API) GroupsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := a.server.CreateGroup(body.Name); err != nil {
+		if err := s.CreateGroup(body.Name); err != nil {
 			http.Error(w, "failed to save group", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodDelete:
-		if !a.isAdmin(r) {
+		if !s.isAdmin(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		name := r.URL.Path[len("/api/groups/"):]
 
-		err := a.server.DeleteGroup(name)
+		err := s.DeleteGroup(name)
 		if err == store.ErrNotEmpty {
 			http.Error(w, "group not empty", http.StatusConflict)
 			return
@@ -189,22 +153,24 @@ func (a *API) GroupsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *API) PublicChatHandler(w http.ResponseWriter, r *http.Request) {
+// PublicChatHandler handles public chat history
+func (s *Server) PublicChatHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(a.server.GetPublicChatHistory())
+	_ = json.NewEncoder(w).Encode(s.GetPublicChatHistory())
 }
 
-func (a *API) RoomChatHandler(w http.ResponseWriter, r *http.Request) {
+// RoomChatHandler handles room chat history
+func (s *Server) RoomChatHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Path[len("/api/chat/room/"):]
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	history, err := a.server.GetRoomChatHistory(id)
+	history, err := s.GetRoomChatHistory(id)
 	if err == store.ErrNotFound {
 		http.Error(w, "room not found", http.StatusNotFound)
 		return
@@ -213,8 +179,9 @@ func (a *API) RoomChatHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(history)
 }
 
-func (a *API) UploadHandler(w http.ResponseWriter, r *http.Request) {
-	if !a.server.AllowUploads {
+// UploadHandler handles file uploads
+func (s *Server) UploadHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.AllowUploads {
 		http.Error(w, "uploading not allowed", http.StatusForbidden)
 		return
 	}
@@ -238,7 +205,7 @@ func (a *API) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	url, err := a.server.SaveImage(header.Filename, file)
+	url, err := s.SaveImage(header.Filename, file)
 	if err != nil {
 		if err.Error() == "uploading not allowed" {
 			http.Error(w, "uploading not allowed", http.StatusForbidden)
@@ -252,7 +219,8 @@ func (a *API) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"url": url})
 }
 
-func (a *API) AdminSetupHandler(w http.ResponseWriter, r *http.Request) {
+// AdminSetupHandler handles admin setup
+func (s *Server) AdminSetupHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -265,7 +233,7 @@ func (a *API) AdminSetupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret, err := a.server.VerifyAdminSetup(body.Token)
+	secret, err := s.VerifyAdminSetup(body.Token)
 	if err != nil {
 		http.Error(w, "invalid token", http.StatusForbidden)
 		return
@@ -277,12 +245,13 @@ func (a *API) AdminSetupHandler(w http.ResponseWriter, r *http.Request) {
 	}{Secret: secret})
 }
 
-func (a *API) AdminChallengeHandler(w http.ResponseWriter, r *http.Request) {
+// AdminChallengeHandler generates admin auth challenge
+func (s *Server) AdminChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	nonce, exp := a.server.CreateAdminChallenge()
+	nonce, exp := s.CreateAdminChallenge()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Nonce string `json:"nonce"`
@@ -290,12 +259,13 @@ func (a *API) AdminChallengeHandler(w http.ResponseWriter, r *http.Request) {
 	}{Nonce: nonce, Exp: exp})
 }
 
-func (a *API) AdminMoveUserHandler(w http.ResponseWriter, r *http.Request) {
+// AdminMoveUserHandler moves user to another room
+func (s *Server) AdminMoveUserHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.isAdmin(r) {
+	if !s.isAdmin(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -307,7 +277,7 @@ func (a *API) AdminMoveUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if err := a.server.MoveUser(body.UID, body.RoomID); err != nil {
+	if err := s.MoveUser(body.UID, body.RoomID); err != nil {
 		if err == store.ErrNotFound {
 			http.Error(w, "user or room not found", http.StatusNotFound)
 			return
@@ -318,10 +288,14 @@ func (a *API) AdminMoveUserHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *API) WSHandler(w http.ResponseWriter, r *http.Request) {
-	a.server.WSHandler(w, r)
-}
+// AdminStatusHandler returns server status
+func (s *Server) AdminStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.isAdmin(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-func (a *API) AudioWSHandler(w http.ResponseWriter, r *http.Request) {
-	a.server.AudioWSHandler(w, r)
+	stats := s.GetServerStats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
 }

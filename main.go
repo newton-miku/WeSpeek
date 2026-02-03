@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/newton-miku/WeSpeek/internal/api"
 	"github.com/newton-miku/WeSpeek/internal/server"
 	"github.com/newton-miku/WeSpeek/internal/store/local"
 	"github.com/newton-miku/WeSpeek/internal/store/sqlite"
@@ -19,90 +18,82 @@ func main() {
 	dbPath := flag.String("db", "wespeek.db", "Path to SQLite database file")
 	flag.Parse()
 
+	// Initialize database
 	st, err := sqlite.New(*dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer st.Close()
 
-	// Initialize FileStore (currently local)
-	// Can be extended to support S3/MinIO based on config
-	// Store in data/uploads instead of web/uploads for better Docker compatibility
+	// Initialize FileStore
 	uploadDir := util.EnvOr("WSPEEK_UPLOAD_DIR", "data/uploads")
 	fileStore := local.NewFileStore(uploadDir+"/img", "/uploads/img")
 
+	// Create server with WebRTC support
 	srv := server.New(st, fileStore, true, true)
 
-	// Configure server behavior from environment
+	// Configure from environment
 	if val := os.Getenv("WSPEEK_STORE_IMAGES"); val != "" {
 		srv.StoreImagesAsFiles = val == "true"
 	} else {
-		srv.StoreImagesAsFiles = true // Default to true
+		srv.StoreImagesAsFiles = true
 	}
 
 	if val := os.Getenv("WSPEEK_ALLOW_UPLOAD"); val != "" {
 		srv.AllowUploads = val == "true"
 	} else {
-		srv.AllowUploads = true // Default to true
+		srv.AllowUploads = true
 	}
 
+	// Initialize server (loads rooms from SQLite, starts background loops)
 	if err := srv.Init(); err != nil {
 		log.Fatal(err)
 	}
 	srv.InitAdmin(*genAdmin)
 
-	apiHandler := api.New(srv)
-
+	// Create HTTP mux
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", apiHandler.WSHandler)
-	mux.HandleFunc("/ws/audio", apiHandler.AudioWSHandler)
-	mux.HandleFunc("/api/rooms", apiHandler.RoomsHandler)
-	mux.HandleFunc("/api/rooms/", apiHandler.RoomMembersHandler)
-	mux.HandleFunc("/api/chat/public", apiHandler.PublicChatHandler)
-	mux.HandleFunc("/api/chat/room/", apiHandler.RoomChatHandler)
-	mux.HandleFunc("/api/upload", apiHandler.UploadHandler)
-	mux.HandleFunc("/api/admin/challenge", apiHandler.AdminChallengeHandler)
-	mux.HandleFunc("/api/admin/move_user", apiHandler.AdminMoveUserHandler)
-	mux.HandleFunc("/api/admin/setup", apiHandler.AdminSetupHandler)
-	mux.HandleFunc("/api/admin/status", apiHandler.AdminStatusHandler)
-	mux.HandleFunc("/api/groups", apiHandler.GroupsHandler)
-	mux.HandleFunc("/api/groups/", apiHandler.GroupsHandler)
+
+	// WebSocket handlers
+	mux.HandleFunc("/ws", srv.WSHandler)
+	// API handlers
+	mux.HandleFunc("/api/rooms", srv.RoomsHandler)
+	mux.HandleFunc("/api/rooms/", srv.RoomMembersHandler)
+	mux.HandleFunc("/api/chat/public", srv.PublicChatHandler)
+	mux.HandleFunc("/api/chat/room/", srv.RoomChatHandler)
+	mux.HandleFunc("/api/upload", srv.UploadHandler)
+	mux.HandleFunc("/api/admin/challenge", srv.AdminChallengeHandler)
+	mux.HandleFunc("/api/admin/move_user", srv.AdminMoveUserHandler)
+	mux.HandleFunc("/api/admin/setup", srv.AdminSetupHandler)
+	mux.HandleFunc("/api/admin/status", srv.AdminStatusHandler)
+	mux.HandleFunc("/api/groups", srv.GroupsHandler)
+	mux.HandleFunc("/api/groups/", srv.GroupsHandler)
 
 	// Serve uploaded files
-	// Note: We strip prefix "/uploads/" and serve from the upload directory's parent (since we used uploadDir/img)
-	// Wait, local.NewFileStore("data/uploads/img", "/uploads/img") means files are at data/uploads/img/xxx.jpg
-	// and URL is /uploads/img/xxx.jpg
-	// So http.StripPrefix("/uploads/", http.FileServer(http.Dir("data/uploads"))) works because:
-	// Request: /uploads/img/xxx.jpg -> Strip -> img/xxx.jpg -> Serve from data/uploads -> data/uploads/img/xxx.jpg. Correct.
-
-	// With dynamic uploadDir:
-	// If uploadDir="data/uploads", then NewFileStore uses "data/uploads/img".
-	// We should serve "data/uploads" at "/uploads/".
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(uploadDir))))
 
+	// Serve web frontend
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
+	// Start HTTP server
 	addr := util.EnvOr("WSPEEK_ADDR", ":7000")
-	s := &http.Server{
+	httpServer := &http.Server{
 		Addr:              addr,
 		Handler:           CORSMiddleware(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Println("listening on", addr)
-	if err := s.ListenAndServe(); err != nil {
+	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow all origins for development convenience.
-		// For production, you might want to restrict this.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-Admin-Auth")
 
-		// Handle preflight requests
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return

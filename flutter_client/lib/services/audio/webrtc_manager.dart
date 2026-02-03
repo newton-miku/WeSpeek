@@ -27,11 +27,11 @@ class WebRTCManager {
   // ICE Servers (Should be configurable)
   final Map<String, dynamic> _config = {
     'iceServers': [
-      {'urls': 'stun:stun.l.google.com:19302'},
-      {'urls': 'stun:global.stun.twilio.com:3478'},
       {'urls': 'stun:turn.cloud-rtc.com:80'},
       {'urls': 'stun:stun.hitv.com'},
       {'urls': 'stun:stun.douyucdn.cn:18000'},
+      {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:global.stun.twilio.com:3478'},
     ],
     'sdpSemantics': 'unified-plan',
   };
@@ -43,7 +43,13 @@ class WebRTCManager {
     this.streamProvider,
     this.onRemoteStream,
     this.onRemoteStreamRemoved,
-  });
+    List<Map<String, dynamic>>? iceServers,
+  }) {
+    // Merge provided ICE servers with defaults
+    if (iceServers != null && iceServers.isNotEmpty) {
+      _config['iceServers'] = iceServers;
+    }
+  }
 
   Future<void> start(List<String> memberUids, {bool captureMedia = true, bool initiator = false, MediaStream? stream}) async {
     _logger.i("Starting WebRTC Mesh ($label) for members: $memberUids, capture: $captureMedia");
@@ -64,7 +70,11 @@ class WebRTCManager {
             _localStream = await streamProvider!();
           } else {
             _localStream = await navigator.mediaDevices.getUserMedia({
-              'audio': true,
+              'audio': {
+                'autoGainControl': false, // 禁用自动增益控制，避免改变系统麦克风音量设置
+                'echoCancellation': true, // 启用回声消除
+                'noiseSuppression': true, // 启用噪声抑制
+              },
               'video': false,
             });
           }
@@ -298,6 +308,8 @@ class WebRTCManager {
   Future<void> _sendSignal(String uid, String type, Map<String, dynamic> payload) async {
     final wrappedPayload = Map<String, dynamic>.from(payload);
     wrappedPayload['label'] = label;
+    wrappedPayload['from'] = myUid; // Add sender UID for debugging
+    _logger.d("Sending signal: type=$type, to=$uid, label=$label");
     onSignal({
       'target': uid,
       'type': type,
@@ -306,38 +318,59 @@ class WebRTCManager {
   }
 
   Future<void> _createPeer(String uid, {bool initiator = false}) async {
-    _logger.i("Creating PeerConnection for $uid");
+    _logger.i("Creating PeerConnection for $uid, initiator=$initiator");
     RTCPeerConnection pc = await createPeerConnection(_config);
     _pcs[uid] = pc;
+    _logger.d("PeerConnection created for $uid, state=${pc.connectionState}");
 
     if (_localStream != null) {
       _localStream!.getTracks().forEach((track) {
         pc.addTrack(track, _localStream!);
       });
+      _logger.d("Added ${_localStream!.getTracks().length} tracks to peer $uid");
     }
 
     pc.onIceCandidate = (candidate) {
+      _logger.d("ICE candidate for $uid: ${candidate.candidate?.substring(0, 50)}...");
       _sendSignal(uid, 'candidate', candidate.toMap());
     };
 
     pc.onTrack = (event) {
+      _logger.i("onTrack event for $uid: track.kind=${event.track.kind}, stream.id=${event.streams.firstOrNull?.id}");
+      _logger.d("Event streams count: ${event.streams.length}, track enabled: ${event.track.enabled}");
+
       if (event.track.kind == 'audio') {
-        _logger.i("Received remote audio track from $uid");
+        _logger.i("Received REMOTE AUDIO track from $uid, streams=${event.streams.length}");
+
         if (event.streams.isNotEmpty) {
-          _remoteStreams[uid] = event.streams[0];
-          
-          // Ensure audio output is routed to speaker (mobile/desktop consistency)
-          if (!kIsWeb) {
-            Helper.setSpeakerphoneOn(true); 
+          final remoteStream = event.streams[0];
+          _remoteStreams[uid] = remoteStream;
+          _logger.d("Cached remote stream ${remoteStream.id} for $uid");
+          _logger.d("Remote stream has ${remoteStream.getTracks().length} tracks: "
+              "${remoteStream.getAudioTracks().length} audio, ${remoteStream.getVideoTracks().length} video");
+
+          // List all track IDs for debugging
+          for (var track in remoteStream.getTracks()) {
+            _logger.d("  Track: ${track.id}, kind: ${track.kind}, enabled: ${track.enabled}");
           }
-          
-          // Force enable track
-          event.track.enabled = true;
-          Helper.setVolume(_masterVolume, event.track);
         }
+
+        // Ensure audio output is routed to speaker (mobile/desktop consistency)
+        if (!kIsWeb) {
+          Helper.setSpeakerphoneOn(true);
+        }
+
+        // Force enable track and set volume
+        event.track.enabled = true;
+        Helper.setVolume(_masterVolume, event.track);
+        _logger.d("Set audio track enabled=true, volume=$_masterVolume");
       }
-      if (onRemoteStream != null) {
+
+      if (event.streams.isNotEmpty && onRemoteStream != null) {
+        _logger.d("Calling onRemoteStream callback for $uid with stream ${event.streams[0].id}");
         onRemoteStream!(event.streams[0], uid);
+      } else if (event.streams.isEmpty) {
+        _logger.w("onTrack event has no streams for $uid!");
       }
     };
 
@@ -363,12 +396,20 @@ class WebRTCManager {
   }
 
   Future<void> handleSignal(String senderUid, String type, dynamic payload) async {
-    if (!_isActive) return;
+    if (!_isActive) {
+      _logger.w("handleSignal called but WebRTC is not active");
+      return;
+    }
+
+    _logger.d("Received signal from $senderUid: type=$type, payload keys=${payload.keys.toList()}");
 
     // Check label if present in payload (backward compatibility: if no label, assume 'audio' if this is 'audio')
     // Actually, caller should filter. But we can check too.
     if (payload is Map && payload.containsKey('label')) {
-      if (payload['label'] != label) return;
+      if (payload['label'] != label) {
+        _logger.d("Ignoring signal: label mismatch (${payload['label']} != $label)");
+        return;
+      }
     }
 
     // In Mesh mode, we expect signals from specific UIDs.
@@ -377,31 +418,46 @@ class WebRTCManager {
        // Or we are the callee (myUid > senderUid).
        // We should create PC if not exists.
        if (myUid.compareTo(senderUid) > 0) { // Only if I am supposed to be answerer?
-          // Actually, if they sent offer, I must answer regardless of ID comparison, 
+          // Actually, if they sent offer, I must answer regardless of ID comparison,
           // but usually ID comparison decides who initiates.
           // If I receive offer, I must create PC.
+          _logger.i("Creating peer for incoming offer from $senderUid");
           await _createPeer(senderUid);
        } else {
          // I should have initiated. If I didn't, maybe race condition.
          // Let's create anyway.
+         _logger.i("Creating peer for incoming signal from $senderUid (race condition)");
          await _createPeer(senderUid);
        }
     }
 
     RTCPeerConnection? pc = _pcs[senderUid];
-    if (pc == null) return;
+    if (pc == null) {
+      _logger.e("No PeerConnection for $senderUid");
+      return;
+    }
+
+    _logger.d("Processing $type signal for $senderUid, PC state=${pc.connectionState}");
 
     try {
       if (type == 'offer') {
+        _logger.i("Setting remote description for offer from $senderUid");
         final description = RTCSessionDescription(payload['sdp'], payload['type']);
         await pc.setRemoteDescription(description);
         final answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         _sendSignal(senderUid, 'answer', answer.toMap());
+        _logger.i("Sent answer to $senderUid");
       } else if (type == 'answer') {
+        _logger.i("Setting remote description for answer from $senderUid");
         final description = RTCSessionDescription(payload['sdp'], payload['type']);
         await pc.setRemoteDescription(description);
       } else if (type == 'candidate') {
+        if (payload['candidate'] == null) {
+          _logger.w("Empty ICE candidate from $senderUid");
+          return;
+        }
+        _logger.d("Adding ICE candidate from $senderUid");
         final candidate = RTCIceCandidate(
           payload['candidate'],
           payload['sdpMid'],

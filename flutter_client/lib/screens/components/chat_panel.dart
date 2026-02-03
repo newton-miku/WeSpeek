@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:pasteboard/pasteboard.dart';
@@ -371,7 +372,10 @@ class _ChatPanelState extends State<ChatPanel> {
 
   Future<void> _pickImage(CallProvider provider) async {
     try {
-      FilePickerResult? result = await FilePicker.platform.pickFiles(
+      FilePickerResult? result;
+
+      // file_picker 8.x API: use FilePicker.platform
+      result = await FilePicker.platform.pickFiles(
         type: FileType.image,
         withData: true,
       );

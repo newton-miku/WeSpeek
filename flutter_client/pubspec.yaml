@@ -60,7 +60,7 @@ dependencies:
   flutter_webrtc: ^1.2.1
   desktop_multi_window: ^0.3.0
   uuid: ^4.5.2
-  file_picker: ^10.3.8
+  file_picker: ^8.3.5
 
 dependency_overrides:
   opus_flutter_windows:

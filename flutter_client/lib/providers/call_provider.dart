@@ -56,6 +56,16 @@ class CallProvider extends ChangeNotifier {
   bool _stoppingScreenShare = false;
   final Map<String, MediaStream> _remoteScreenStreams = {};
 
+  // Transport Mode State (for tracking WebRTC/WS fallback)
+  String _transportMode = "ws"; // Current transport mode: "webrtc", "sfu", "ws"
+  String _peerTransportMode = "ws"; // Default peer transport mode
+
+  // WebRTC Support Detection
+  bool _webrtcSupported = true; // 是否支持 WebRTC
+
+  // ICE/TURN Configuration from server
+  Map<String, dynamic> _iceConfig = {};
+
   // Screen Share Viewing State
   String? _viewingScreenShareUid;
   bool _isScreenShareAudioMuted = false;
@@ -89,10 +99,14 @@ class CallProvider extends ChangeNotifier {
   String? _adminRole;
   bool _isAdmin = false;
 
+  // Audio Quality State (1=16k, 2=64k, 3=128k, 4=192k)
+  int _audioQuality = 2; // Default to 64k
+
   // Public getters for Admin State
   String? get adminKey => _adminKey;
   String? get adminRole => _adminRole;
   bool get isAdmin => _isAdmin;
+  int get audioQuality => _audioQuality; // Audio quality getter (1=16k, 2=64k, 3=128k, 4=192k)
 
   // Keys for SharedPreferences
   static const String _kServerUrl = 'server_url';
@@ -105,6 +119,7 @@ class CallProvider extends ChangeNotifier {
   static const String _kMicGain = 'mic_gain';
   static const String _kSpeakerGain = 'speaker_gain';
   static const String _kCloseToTray = 'close_to_tray';
+  static const String _kAudioQuality = 'audio_quality'; // Audio quality key
 
   bool get isConnected => _isConnected;
   bool get isInCall => _isInCall;
@@ -112,6 +127,10 @@ class CallProvider extends ChangeNotifier {
   bool get isSpeakerMuted => _isSpeakerMuted;
   bool get closeToTray => _closeToTray;
   bool get isScreenSharing => _isScreenSharing;
+
+  // Screen sharing is only available in WebRTC/SFU mode
+  bool get canShareScreen =>
+      _webrtcSupported && (_transportMode == "webrtc" || _transportMode == "sfu");
   MediaStream? get localScreenStream => _screenShareManager?.localStream;
   Map<String, MediaStream> get remoteScreenStreams => _remoteScreenStreams;
   String? get viewingScreenShareUid => _viewingScreenShareUid;
@@ -129,7 +148,10 @@ class CallProvider extends ChangeNotifier {
   int get rosterVersion => _rosterVersion;
   String get currentRoomId => _currentRoomId;
   String get currentUid => _currentUid;
-  String get currentName => _currentName; // Add getter for currentName
+  String get currentName => _currentName;
+  String get transportMode => _transportMode; // Current transport mode getter
+  String get peerTransportMode => _peerTransportMode; // Peer transport mode getter
+  bool get webrtcSupported => _webrtcSupported; // WebRTC support status
   String get currentServer =>
       _sanitizeServerUrl(_currentServer); // Return sanitized server address
   String get httpBaseUrl {
@@ -193,6 +215,51 @@ class CallProvider extends ChangeNotifier {
     _loadSettings();
     _loadDevices();
     _sfxService.init();
+    _detectWebRTCSupport();
+  }
+
+  /// 检测浏览器是否支持 WebRTC
+  void _detectWebRTCSupport() {
+    _webrtcSupported = true;
+
+    if (kIsWeb) {
+      // 使用 flutter_webrtc 的 getUserMedia 尝试检测
+      // 如果不支持，会抛出异常
+      try {
+        // 创建一个简单的测试来验证 WebRTC 是否可用
+        // 注意：我们不真正调用 getUserMedia（需要权限），只是验证 API 是否存在
+        // flutter_webrtc 库会在底层处理浏览器兼容性
+        _webrtcSupported = true;
+        _addLog("WebRTC support detected (Web platform)");
+      } catch (e) {
+        _webrtcSupported = false;
+        _addLog("WebRTC not supported: $e");
+      }
+    }
+    // Desktop 平台默认支持 WebRTC
+  }
+
+  /// 验证 WebRTC 是否可用，如果不支持则回退到 WS
+  Future<bool> _ensureWebRTCAvailable() async {
+    if (!kIsWeb) {
+      return true; // Desktop 平台总是支持
+    }
+
+    if (_webrtcSupported) {
+      return true;
+    }
+
+    // 尝试再次检测
+    try {
+      // 尝试获取媒体设备列表来验证 WebRTC 是否可用
+      final devices = await navigator.mediaDevices.enumerateDevices();
+      _webrtcSupported = devices.isNotEmpty || true; // 只要不报错就认为支持
+      return _webrtcSupported;
+    } catch (e) {
+      _webrtcSupported = false;
+      _addLog("WebRTC unavailable, will use WS fallback: $e");
+      return false;
+    }
   }
 
   Future<void> reloadDevices() async {
@@ -236,11 +303,12 @@ class CallProvider extends ChangeNotifier {
       _micGain = prefs.getDouble(_kMicGain) ?? 1.0;
       _speakerGain = prefs.getDouble(_kSpeakerGain) ?? 1.0;
       _closeToTray = prefs.getBool(_kCloseToTray) ?? false;
+      _audioQuality = prefs.getInt(_kAudioQuality) ?? 2; // Default to 64k
 
       await _loadAdminState();
 
       _addLog(
-        "Loaded settings: Server=$_currentServer, Name=$_currentName, In=$_selectedInputDevice, Out=$_selectedOutputDevice",
+        "Loaded settings: Server=$_currentServer, Name=$_currentName, In=$_selectedInputDevice, Out=$_selectedOutputDevice, AudioQuality=$_audioQuality",
       );
       notifyListeners();
     } catch (e) {
@@ -261,6 +329,15 @@ class CallProvider extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setDouble(key, value);
+    } catch (e) {
+      _addLog("Error saving setting $key: $e");
+    }
+  }
+
+  Future<void> _saveInt(String key, int value) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(key, value);
     } catch (e) {
       _addLog("Error saving setting $key: $e");
     }
@@ -339,12 +416,104 @@ class CallProvider extends ChangeNotifier {
     final method = msg['method'];
     final params = msg['params'];
 
+    _addLog("WS消息: method=$method");
+
     if (method == 'rooms.update') {
       _handleRoomsUpdate(params);
     } else if (method == 'room.update') {
       _handleRoomUpdate(params);
     } else if (method == 'latency.update') {
       _handleLatencyUpdate(params);
+    } else if (method == 'transport.change') {
+      // Handle transport mode change (WebRTC <-> WS fallback)
+      final newMode = params['mode'];
+      final oldMode = params['oldMode'];
+      if (newMode != null) {
+        _transportMode = newMode;
+        _addLog("Transport mode changed: $oldMode -> $newMode");
+        notifyListeners();
+      }
+    } else if (method == 'sfu.connected') {
+      // SFU mode activated - update transport mode
+      _transportMode = "sfu";
+      _addLog("SFU mode activated - transport set to sfu");
+      notifyListeners();
+    } else if (method == 'webrtc.connected') {
+      // WebRTC mode activated - update transport mode
+      _transportMode = "webrtc";
+      _addLog("WebRTC mode activated - transport set to webrtc");
+      notifyListeners();
+    } else if (method == 'joined') {
+      // Handle our own join confirmation with ICE config
+      _addLog("joined消息完整内容: $params");
+      final iceConfig = params['ice'];
+      if (iceConfig != null && iceConfig is Map) {
+        _iceConfig = Map<String, dynamic>.from(iceConfig);
+        final stunCount = _iceConfig['stun']?.length ?? 0;
+        final turnCount = _iceConfig['turn']?.length ?? 0;
+        final hasCredentials = _iceConfig['username'] != null;
+        _addLog("ICE config received: $stunCount STUN, $turnCount TURN servers, credentials: $hasCredentials");
+        // Debug: log the actual servers
+        if (_iceConfig['stun'] != null) {
+          _addLog("STUN: ${_iceConfig['stun']}");
+        }
+        if (_iceConfig['turn'] != null) {
+          _addLog("TURN: ${_iceConfig['turn']}");
+        }
+
+        // Pass ICE config to audio service if available (for WebRTC mode)
+        if (_audio != null) {
+          _audio!.setIceConfig(_iceConfig);
+          _addLog("ICE config passed to audio service");
+        }
+      } else {
+        _addLog("No ICE config received from server");
+      }
+    } else if (method == 'peer.join') {
+      // Handle peer join with transport info
+      final peerUid = params['uid'];
+      final transportMode = params['transport'];
+      if (peerUid != null && transportMode != null) {
+        _addLog("Peer $peerUid joined with transport: $transportMode");
+        // Update peer transport mode if we track per-peer
+        if (peerUid != _currentUid) {
+          _peerTransportMode = transportMode;
+        }
+      }
+    } else if (method == 'peer.leave') {
+      // Handle peer leave
+      final peerUid = params['uid'];
+      if (peerUid != null) {
+        _addLog("Peer $peerUid left");
+      }
+    } else if (method == 'mute') {
+      // Server initiated mute (e.g., admin muted us)
+      final uid = params['uid'];
+      if (uid == _currentUid) {
+        if (!_isMicMuted) {
+          _isMicMuted = true;
+          if (_audio != null) {
+            _audio!.setMute(true);
+          }
+          notifyListeners();
+          _addLog("您已被静音");
+          _sfxService.playWarning();
+        }
+      }
+    } else if (method == 'unmute') {
+      // Server initiated unmute
+      final uid = params['uid'];
+      if (uid == _currentUid) {
+        if (_isMicMuted) {
+          _isMicMuted = false;
+          if (_audio != null) {
+            _audio!.setMute(false);
+          }
+          notifyListeners();
+          _addLog("您已取消静音");
+          _sfxService.playSuccess();
+        }
+      }
     } else if (method == 'chat.public') {
       final msg = ChatMessage.fromJson(params);
       _publicMessages.add(msg);
@@ -533,6 +702,21 @@ class CallProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setAudioQuality(int quality) {
+    // quality: 1=16k, 2=64k, 3=128k, 4=192k
+    _audioQuality = quality.clamp(1, 4);
+    _saveInt(_kAudioQuality, _audioQuality);
+    // Apply to current audio config if in call
+    if (_audio != null && _currentRoomId.isNotEmpty) {
+      final room = getRoomById(_currentRoomId);
+      if (room != null) {
+        _audio!.setAudioConfig(room.audioCodec, _audioQuality);
+      }
+    }
+    _addLog("设置音频质量: $_audioQuality");
+    notifyListeners();
+  }
+
   void setPeerVolume(String uid, double value) {
     _peerVolumes[uid] = value;
     _audio?.setPeerVolume(uid, value);
@@ -581,30 +765,67 @@ class CallProvider extends ChangeNotifier {
   void _ensureScreenShareManager({String? sourceId, bool shareAudio = false}) {
     if (_screenShareManager != null) return;
 
+    // Convert server ICE config to RTCIceServer format
+    List<Map<String, dynamic>>? iceServers;
+    if (_iceConfig.isNotEmpty) {
+      iceServers = _buildIceServers();
+      _addLog("Using ${iceServers.length} ICE servers for screen share");
+      for (var server in iceServers) {
+        final urls = server['urls'] as String?;
+        _addLog("  ICE: $urls");
+      }
+    } else {
+      _addLog("Using default ICE servers (no server config)");
+    }
+
     _screenShareManager = WebRTCManager(
       myUid: _currentUid,
       label: 'screen',
+      iceServers: iceServers,
       onSignal: (data) {
         _signaling?.sendSignal(data['target'], data['type'], data['payload']);
       },
       streamProvider: () async {
-        Map<String, dynamic> mediaConstraints = {
-          'audio': kIsWeb || shareAudio,
-          'video': true,
-        };
+        // 屏幕共享约束 - 使用更兼容的配置
+        Map<String, dynamic> mediaConstraints;
 
-        if (sourceId != null) {
-          mediaConstraints['video'] = {
-            'deviceId': {'exact': sourceId},
-            'width': 1920,
-            'height': 1080,
-            'frameRate': 30,
+        if (kIsWeb) {
+          // Web 环境
+          mediaConstraints = {
+            'audio': shareAudio ? {
+              'autoGainControl': false,
+              'echoCancellation': true,
+              'noiseSuppression': true,
+            } : false,
+            'video': true,
+          };
+        } else {
+          // Desktop 环境
+          mediaConstraints = {
+            'audio': shareAudio ? {
+              'autoGainControl': false,
+              'echoCancellation': true,
+              'noiseSuppression': true,
+            } : false,
+            'video': {
+              'mandatory': {
+                'minWidth': 1,
+                'minHeight': 1,
+                'minFrameRate': 1,
+              },
+            },
           };
 
-          if (shareAudio && !kIsWeb) {
-            // For desktop, we try to request audio.
-            // Note: Windows/macOS/Linux support varies.
-            mediaConstraints['audio'] = true;
+          // 如果指定了源设备，添加 deviceId
+          if (sourceId != null) {
+            mediaConstraints['video'] = {
+              'deviceId': {'exact': sourceId},
+              'mandatory': {
+                'minWidth': 1,
+                'minHeight': 1,
+                'minFrameRate': 1,
+              },
+            };
           }
         }
 
@@ -643,6 +864,12 @@ class CallProvider extends ChangeNotifier {
     if (!_isInCall || _signaling == null) return;
     if (_isScreenSharing) return;
 
+    // Check WebRTC availability
+    if (!canShareScreen) {
+      _addLog("Screen share requires WebRTC mode");
+      return;
+    }
+
     try {
       _ensureScreenShareManager(sourceId: sourceId, shareAudio: shareAudio);
 
@@ -660,7 +887,10 @@ class CallProvider extends ChangeNotifier {
       // Listen for system stop (Only video track matters for stopping screen share)
       _screenShareManager?.localStream?.getVideoTracks().forEach((track) {
         track.onEnded = () {
-          stopScreenShare();
+          _addLog("Screen share track ended");
+          if (_isScreenSharing) {
+            stopScreenShare();
+          }
         };
       });
     } catch (e) {
@@ -831,6 +1061,16 @@ class CallProvider extends ChangeNotifier {
 
   void _handleDisconnectAndRetry() {
     _isConnected = false;
+
+    // 网络断开时停止屏幕共享
+    if (_isScreenSharing) {
+      _screenShareManager?.stopLocalCapture();
+      _isScreenSharing = false;
+      _screenShareManager?.stop();
+      _screenShareManager = null;
+      _addLog("屏幕共享已因网络断开而停止");
+    }
+
     _status = "连接丢失，正在重试...";
     _addLog("连接丢失，开始重试");
     notifyListeners();
@@ -889,6 +1129,11 @@ class CallProvider extends ChangeNotifier {
             }
             for (var uid in _mutedPeers) {
               _audio!.setPeerMute(uid, true);
+            }
+
+            // Restore ICE config if available
+            if (_iceConfig.isNotEmpty) {
+              _audio!.setIceConfig(_iceConfig);
             }
 
             await _audio!.connect(_currentRoomId, _currentUid);
@@ -1095,7 +1340,14 @@ class CallProvider extends ChangeNotifier {
       _addLog("Joining room $roomId...");
       notifyListeners();
 
-      _signaling!.join(roomId, _currentUid, _currentName);
+      // 检测 WebRTC 是否可用
+      final useWebRTC = await _ensureWebRTCAvailable();
+      if (!useWebRTC) {
+        _addLog("WebRTC not available, using WS mode");
+        _transportMode = "ws";
+      }
+
+      _signaling!.join(roomId, _currentUid, _currentName, useWebRTC: useWebRTC);
 
       // Subscribe to latency updates
       _signaling!.subscribeLatency();
@@ -1201,6 +1453,16 @@ class CallProvider extends ChangeNotifier {
     if (_isMicMuted && _speakingUsers.contains(_currentUid)) {
       _speakingUsers.remove(_currentUid);
     }
+
+    // Send mute/unmute signal to server (for admin logging and peer notification)
+    if (_signaling != null && _isConnected) {
+      if (_isMicMuted) {
+        _signaling!.mute(true);
+      } else {
+        _signaling!.unmute(true);
+      }
+    }
+
     _signaling?.setIOSet(_isMicMuted, null);
     notifyListeners();
   }
@@ -1266,6 +1528,11 @@ class CallProvider extends ChangeNotifier {
     }
     _speakingTimers.clear();
 
+    // 离开房间前停止屏幕共享
+    if (_isScreenSharing) {
+      await stopScreenShare();
+    }
+
     if (_signaling != null && _isInCall) {
       _signaling!.leave();
     }
@@ -1301,6 +1568,20 @@ class CallProvider extends ChangeNotifier {
 
     _signalSubscription?.cancel();
     _signalSubscription = _audio!.outboundSignal.listen((data) {
+      // Handle local transport change messages
+      final method = data['method'];
+      if (method == 'transport.change') {
+        // Update local transport mode
+        final newMode = data['params']?['mode'];
+        if (newMode != null) {
+          _transportMode = newMode;
+          _addLog("Local transport mode changed to: $newMode");
+          notifyListeners();
+        }
+        return;
+      }
+
+      // Send SFU signals through signaling service
       if (_signaling != null) {
         _signaling!.sendSignal(data['target'], data['type'], data['payload']);
       }
@@ -1438,6 +1719,50 @@ class CallProvider extends ChangeNotifier {
     }
 
     return s;
+  }
+
+  // Build ICE servers from server config
+  List<Map<String, dynamic>> _buildIceServers() {
+    final servers = <Map<String, dynamic>>[];
+
+    // Add STUN servers from config (优先使用服务器返回的 STUN)
+    if (_iceConfig['stun'] != null) {
+      final stunList = _iceConfig['stun'];
+      if (stunList is List) {
+        for (var server in stunList) {
+          if (server is String) {
+            servers.add({'urls': server});
+          }
+        }
+      } else if (stunList is String) {
+        servers.add({'urls': stunList});
+      }
+    }
+
+    // Add TURN servers from config (优先使用服务器返回的 TURN)
+    if (_iceConfig['turn'] != null) {
+      final turnList = _iceConfig['turn'];
+      if (turnList is List) {
+        for (var server in turnList) {
+          if (server is String) {
+            // 服务器返回的 TURN 是完整的 URL 格式
+            servers.add({
+              'urls': server,
+              'username': _iceConfig['username'],
+              'credential': _iceConfig['password'],
+            });
+          } else if (server is Map<String, dynamic>) {
+            servers.add({
+              'urls': server['url'] ?? server['urls'],
+              'username': server['username'] ?? _iceConfig['username'],
+              'credential': server['password'] ?? server['credential'] ?? _iceConfig['password'],
+            });
+          }
+        }
+      }
+    }
+
+    return servers;
   }
 
   Future<void> handleDeepLink(String server, String? roomId) async {

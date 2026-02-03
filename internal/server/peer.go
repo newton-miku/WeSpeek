@@ -30,17 +30,50 @@ func (s *Server) newPeer(uid, name, ip string, rm *room, webrtc bool, send func(
 	}
 	rm.mu.Unlock()
 
+	// Send joined confirmation with ICE config
+	iceConfig := s.buildIceConfig()
+	send(map[string]interface{}{
+		"method": "joined",
+		"params": map[string]interface{}{
+			"roomId": rm.id,
+			"uid":    uid,
+			"ice":    iceConfig,
+		},
+	})
+
 	s.broadcastRoomUpdate(rm)
 	s.broadcastRoomsUpdate()
 
 	return me
 }
 
-func (p *peer) GetPeerStats() *UserStats {
-	queueSize := 0
-	if p.getAudioQueueSize != nil {
-		queueSize = p.getAudioQueueSize()
+// buildIceConfig returns ICE server configuration for WebRTC
+func (s *Server) buildIceConfig() map[string]interface{} {
+	config := map[string]interface{}{
+		"stun": []map[string]string{
+			{"url": "stun:turn.cloudflare.com:3478"},
+			{"url": "stun:stun.chat.bilibili.com:3478"},
+			{"url": "stun:turn.cloud-rtc.com:80"},
+			{"url": "stun:stun.douyucdn.cn:18000"},
+		},
 	}
+
+	// Add TURN server if available
+	if s.turnServer != nil {
+		turnAddr := s.turnServer.GetAddress()
+		config["turn"] = []map[string]string{
+			{"url": turnAddr},
+		}
+		// Add username if using auth
+		if s.turnServer.GetStats()["has_auth"].(bool) {
+			// Dynamic credentials will be provided separately
+		}
+	}
+
+	return config
+}
+
+func (p *peer) GetPeerStats() *UserStats {
 	return &UserStats{
 		BytesReceived:   atomic.LoadUint64(&p.bytesReceived),
 		PacketsReceived: atomic.LoadUint64(&p.packetsReceived),
@@ -48,7 +81,7 @@ func (p *peer) GetPeerStats() *UserStats {
 		PacketsSent:     atomic.LoadUint64(&p.packetsSent),
 		SentPacketsLost: atomic.LoadInt64(&p.sentPacketsLost),
 		Latency:         atomic.LoadInt64(&p.latency),
-		QueueSize:       queueSize,
+		QueueSize:       0, // No queue in pure WebRTC mode
 	}
 }
 

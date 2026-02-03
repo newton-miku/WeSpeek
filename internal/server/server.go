@@ -3,7 +3,10 @@ package server
 import (
 	"errors"
 	"io"
+	"log"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,7 +14,9 @@ import (
 	"github.com/newton-miku/WeSpeek/internal/domain/entity"
 	"github.com/newton-miku/WeSpeek/internal/domain/repository"
 	"github.com/newton-miku/WeSpeek/internal/service"
+	"github.com/newton-miku/WeSpeek/internal/sfu"
 	"github.com/newton-miku/WeSpeek/internal/store"
+	"github.com/newton-miku/WeSpeek/internal/turn"
 )
 
 type Server struct {
@@ -27,6 +32,12 @@ type Server struct {
 	latencySubs     sync.Map // map[string]func(interface{})
 	adminChallenges sync.Map
 	groups          sync.Map // map[string]struct{}
+
+	// SFU
+	sfu *sfu.IONSFU
+
+	// TURN
+	turnServer *turn.Server
 
 	// Config
 	StoreImagesAsFiles bool
@@ -69,12 +80,6 @@ func (s *Server) GetServerStats() ServerStats {
 				pingCount++
 				roomTotalPing += l
 				roomPingCount++
-			}
-
-			// Queue
-			if p.getAudioQueueSize != nil {
-				totalQueue += p.getAudioQueueSize()
-				queueCount++
 			}
 
 			// Traffic
@@ -120,16 +125,73 @@ func (s *Server) GetServerStats() ServerStats {
 
 func New(s store.Store, fs repository.FileStore, storeImagesAsFiles bool, allowUploads bool) *Server {
 	ms := service.NewMediaService(fs, allowUploads)
-	return &Server{
+
+	server := &Server{
 		roomService:        service.NewRoomService(s, s),
 		chatService:        service.NewChatService(s, ms),
 		adminService:       service.NewAdminService(s),
 		mediaService:       ms,
 		fileStore:          fs,
+		sfu:                sfu.NewIONSFU(sfu.Config{}),
 		StoreImagesAsFiles: storeImagesAsFiles,
-		AllowUploads:       allowUploads, // Default allow
+		AllowUploads:       allowUploads,
 		startTime:          time.Now(),
 	}
+
+	// Initialize TURN server if enabled
+	turnPort := 3478
+
+	// Check environment variables
+	if port := getEnvInt("TURN_SERVER_PORT", 0); port > 0 {
+		turnPort = port
+	}
+
+	if getEnvBool("TURN_SERVER_ENABLED", true) {
+		authSecret := getEnv("TURN_SERVER_SECRET", "")
+		externalIP := getEnv("TURN_SERVER_EXTERNAL_IP", "")
+		externalHost := getEnv("TURN_SERVER_HOST", "")
+
+		server.turnServer = turn.NewServer(turn.Config{
+			Port:        turnPort,
+			Realm:       "wespeak",
+			AuthSecret:  authSecret,
+			ExternalIP:  externalIP,
+			ExternalHost: externalHost,
+			MinPort:     49160,
+			MaxPort:     49200,
+		})
+	}
+
+	return server
+}
+
+// getEnv gets an environment variable with default value
+func getEnv(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// getEnvInt gets an environment variable as int
+func getEnvInt(key string, defaultValue int) int {
+	value := os.Getenv(key)
+	if value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			return intValue
+		}
+	}
+	return defaultValue
+}
+
+// getEnvBool gets an environment variable as bool
+func getEnvBool(key string, defaultValue bool) bool {
+	value := os.Getenv(key)
+	if value != "" {
+		return value == "true" || value == "1" || value == "yes"
+	}
+	return defaultValue
 }
 
 func (s *Server) GetFileStore() repository.FileStore {
@@ -147,48 +209,18 @@ func (s *Server) SaveImage(filename string, r io.Reader) (string, error) {
 func (s *Server) Init() error {
 	// Initialize MediaService
 	s.mediaService = service.NewMediaService(s.fileStore, s.AllowUploads)
-	// Update ChatService with new MediaService
-	// Note: We need to access the repo from existing chatService or re-create it.
-	// Since we don't expose repo, we can't easily re-create it without the store.
-	// However, s.chatService is created in New with 's' (store).
-	// But Server struct doesn't keep 's' (store).
-	// Wait, Server struct DOES NOT keep the store interface.
-
-	// Issue: Server struct in line 16 does not have 'store' field.
-	// New takes 'store.Store' but doesn't save it in Server struct.
-	// So we cannot re-create ChatService here unless we change Server struct.
-
-	// BUT, we can just assume MediaService created in New is sufficient?
-	// No, Init is called later, potentially after config load (AllowUploads).
-	// If AllowUploads changes, we need to update MediaService.
-
-	// Solution: Add SetMediaService to ChatService?
-	// Or simply update the mediaService instance in place? No.
-
-	// Let's check if we can add 'store' to Server struct.
-	// Or just update ChatService.
-
-	// Actually, ChatService depends on MediaService for deletion.
-	// If MediaService changes (e.g. AllowUploads flag), deletion should still work?
-	// Yes, deletion only depends on FileStore, which doesn't change.
-	// AllowUploads only affects Save.
-	// So even if we have an "old" MediaService in ChatService with old AllowUploads, DeleteFile will still work as long as FileStore is valid.
-	// And FileStore is 's.fileStore' which is constant.
-
-	// However, it's better to keep them in sync.
-	// Let's see if we can easily add SetMediaService.
-
-	// I'll add SetMediaService to ChatService.
-
-	// For now, let's just update Init to re-create MediaService and try to update ChatService.
-	// Since I can't re-create ChatService without Store, I'll add SetMediaService.
-
-	// Step 1: Add SetMediaService to ChatService.
-	// Step 2: Call it in Init.
-
-	s.mediaService = service.NewMediaService(s.fileStore, s.AllowUploads)
 	if s.chatService != nil {
 		s.chatService.SetMediaService(s.mediaService)
+	}
+
+	// Start TURN server if configured
+	if s.turnServer != nil {
+		if err := s.turnServer.Start(); err != nil {
+			// Log warning but don't fail - TURN might be disabled
+			log.Printf("Warning: Failed to start TURN server: %v", err)
+		} else {
+			log.Printf("TURN server started successfully")
+		}
 	}
 
 	// Load rooms
@@ -215,12 +247,21 @@ func (s *Server) Init() error {
 	}
 
 	for _, r := range rooms {
+		audioCodec := r.AudioCodec
+		audioQuality := r.AudioQuality
+		// Set defaults if not specified
+		if audioCodec == "" {
+			audioCodec = "opus"
+		}
+		if audioQuality == 0 {
+			audioQuality = 6
+		}
 		s.rooms.Store(r.ID, &room{
 			id:           r.ID,
 			group:        r.Group,
 			order:        r.Order,
-			audioCodec:   r.AudioCodec,
-			audioQuality: r.AudioQuality,
+			audioCodec:   audioCodec,
+			audioQuality: audioQuality,
 			permanent:    r.Permanent,
 			peers:        make(map[string]*peer),
 		})

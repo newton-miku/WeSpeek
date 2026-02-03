@@ -26,6 +26,8 @@ abstract class AudioClient {
   Future<void> setAudioConfig(String codec, int quality);
   void updateRoomState(List<dynamic> members); // dynamic to avoid circular import if RoomMember is not available here, or import it.
   void handleSignal(Map<String, dynamic> data);
+  /// Set ICE configuration from server (STUN/TURN servers)
+  void setIceConfig(Map<String, dynamic> config);
   Stream<Map<String, dynamic>> get outboundSignal;
   Stream<double> get onVolume;
   Stream<MapEntry<String, double>> get onRemoteVolume;

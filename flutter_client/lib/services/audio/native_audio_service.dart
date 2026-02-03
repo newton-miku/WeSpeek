@@ -1,14 +1,13 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:flutter_recorder/flutter_recorder.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:logger/logger.dart';
 import 'package:flutter/foundation.dart';
 import 'package:opus_dart/opus_dart.dart';
-import 'deep_filter_net.dart';
-import '../windows_audio_player.dart';
+import 'deep_filter_net.dart' if (dart.library.js) 'package:wespeek_client/services/audio/deep_filter_net_stub.dart';
+import '../windows_audio_player.dart' if (dart.library.js) 'package:wespeek_client/services/audio/windows_audio_player_stub.dart';
 import 'audio_client.dart';
 import 'webrtc_manager.dart';
 import '../../models/room_model.dart';
@@ -19,25 +18,20 @@ class AudioService implements AudioClient {
   final _logger = Logger(
     level: kReleaseMode ? Level.warning : Level.all,
   );
-  WebSocketChannel? _channel;
+
   final String baseUrl;
 
   // Capture
   final Recorder _recorder = Recorder.instance;
-  // String? _selectedInputDeviceId;
 
   // Playback
-  // // bool _playbackInitialized = false;
   final _windowsPlayer = WindowsAudioPlayer();
 
-  StreamSubscription? _wsSubscription;
   StreamSubscription? _audioDataSubscription;
 
-  int _seq = 0;
   bool _isMuted = false;
   bool _isSpeakerMuted = false;
   double _micGain = 1.0;
-  double _speakerGain = 1.0;
   String _noiseMode = "gate";
   int _gateHold = 0;
   double _gateThreshold = 0.015; // ~ -36dB for float
@@ -69,7 +63,6 @@ class AudioService implements AudioClient {
   final _remoteVolumeController =
       StreamController<MapEntry<String, double>>.broadcast();
   final _errorController = StreamController<String>.broadcast();
-  DateTime _lastErrorTime = DateTime.fromMillisecondsSinceEpoch(0);
 
   // WebRTC Support
   WebRTCManager? _webRTCManager;
@@ -83,6 +76,9 @@ class AudioService implements AudioClient {
   // Local Peer Audio Control
   final Map<String, double> _peerVolumes = {};
   final Set<String> _mutedPeers = {};
+
+  // ICE Configuration from server
+  final Map<String, dynamic> _iceConfig = {};
 
   @override
   Stream<double> get onVolume => _volumeController.stream;
@@ -105,6 +101,15 @@ class AudioService implements AudioClient {
   }
 
   Future<void> _initAudioSystem() async {
+    // On Windows, get actual sample rate first (with fallback)
+    if (Platform.isWindows) {
+      await _windowsPlayer.init(sampleRate: _sampleRate, channels: _channels);
+      if (_windowsPlayer.actualSampleRate != _sampleRate) {
+        _sampleRate = _windowsPlayer.actualSampleRate;
+        _logger.i('Device sample rate: $_sampleRate Hz');
+      }
+    }
+
     _logger.i(
       "Initializing Audio System: ${_sampleRate}Hz (Auto-detect channels), Codec: $_targetCodec",
     );
@@ -308,7 +313,6 @@ class AudioService implements AudioClient {
 
   @override
   void setSpeakerGain(double value) {
-    _speakerGain = value;
     if (_isWebRTC && _webRTCManager != null) {
        _webRTCManager!.setMasterVolume(value);
        // If currently muted, ensure we stay muted (volume 0)
@@ -350,32 +354,19 @@ class AudioService implements AudioClient {
   }
 
   int _mapQualityToSampleRate(int quality, String codec) {
+    // quality: 1=16k, 2=64k, 3=128k, 4=192k (matches AudioQualityLevel in Go backend)
     if (codec == 'opus') return 48000;
-
-    final n = quality.clamp(1, 10);
 
     // For PCM, we respect the user's requested sample rates exactly
     if (codec != 'opus') {
-      switch (n) {
-        case 1:
-          return 12000;
-        case 2:
+      switch (quality) {
+        case 1: // 16k
           return 16000;
-        case 3:
-          return 24000;
-        case 4:
-          return 24000;
-        case 5:
+        case 2: // 64k
           return 32000;
-        case 6:
-          return 32000;
-        case 7:
+        case 3: // 128k
           return 44100;
-        case 8:
-          return 44100;
-        case 9:
-          return 48000;
-        case 10:
+        case 4: // 192k
           return 48000;
         default:
           return 48000;
@@ -383,28 +374,18 @@ class AudioService implements AudioClient {
     }
 
     // For Opus, we snap to supported native rates (8, 12, 16, 24, 48)
+    // 16k -> 16k
+    // 32k -> 24k or 48k
     // 44.1k -> 48k
-    // 32k -> 24k (or 48k)
-    switch (n) {
-      case 1:
-        return 12000;
-      case 2:
+    // 48k -> 48k
+    switch (quality) {
+      case 1: // 16k
         return 16000;
-      case 3:
-        return 24000;
-      case 4:
-        return 24000;
-      case 5:
-        return 24000; // 32k not supported, use 24k (Super Wideband)
-      case 6:
-        return 48000; // 32k -> 48k for higher quality
-      case 7:
-        return 48000; // 44.1k -> 48k
-      case 8:
-        return 48000; // 44.1k -> 48k
-      case 9:
+      case 2: // 64k
         return 48000;
-      case 10:
+      case 3: // 128k
+        return 48000;
+      case 4: // 192k
         return 48000;
       default:
         return 48000;
@@ -412,75 +393,30 @@ class AudioService implements AudioClient {
   }
 
   int _mapQualityToBitrate(int quality) {
-    final n = quality.clamp(1, 10);
-    // Base bitrates for Stereo (reduce for Mono?)
-    // We assume Stereo here. If Mono, Opus Encoder might handle it or we can halve it.
-    // User Recommendations:
-    // 10: 512-1024 -> Cap at 256k for Opus (Transparency)
-    // 9: 384-512 -> 192k
-    // 8: 320-384 -> 160k
-    // 7: 256-320 -> 128k
-    // 6: 192-256 -> 96k
-    // 5: 128-192 -> 64k
-    // 4: 96-128 -> 48k
-    // 3: 64-96 -> 32k
-    // 2: 48-64 -> 24k
-    // 1: 32-48 -> 16k
+    // quality: 1=16k, 2=64k, 3=128k, 4=192k (matches AudioQualityLevel in Go backend)
+    // Bitrate in bits per second
 
-    int bitrate = 64000;
-    switch (n) {
+    switch (quality) {
       case 1:
-        bitrate = 16000;
-        break;
+        return 16000;   // 16kbps - Low bandwidth
       case 2:
-        bitrate = 24000;
-        break;
+        return 64000;   // 64kbps - Standard quality (default)
       case 3:
-        bitrate = 32000;
-        break;
+        return 128000;  // 128kbps - High quality
       case 4:
-        bitrate = 48000;
-        break;
-      case 5:
-        bitrate = 64000;
-        break;
-      case 6:
-        bitrate = 96000;
-        break;
-      case 7:
-        bitrate = 128000;
-        break;
-      case 8:
-        bitrate = 160000;
-        break;
-      case 9:
-        bitrate = 192000;
-        break;
-      case 10:
-        bitrate = 256000;
-        break;
+        return 192000;  // 192kbps - Highest quality
+      default:
+        return 64000;   // Default to standard quality
     }
-
-    // If Mono, reduce bitrate (heuristic: 60-70% of stereo)
-    if (_channels == 1) {
-      bitrate = (bitrate * 0.6).floor();
-    }
-    return bitrate;
   }
 
   @override
   Future<void> setAudioConfig(String codec, int quality) async {
     // codec can be 'opus', 'pcmf32', 'pcm16'
+    // quality: 1=16k, 2=64k, 3=128k, 4=192k
 
     int newSampleRate = _mapQualityToSampleRate(quality, codec);
-    int newBitrate;
-
-    if (codec == 'opus') {
-      // Fix bitrate for Opus to prevent recreation on quality change
-      newBitrate = 64000;
-    } else {
-      newBitrate = _mapQualityToBitrate(quality);
-    }
+    int newBitrate = _mapQualityToBitrate(quality);
 
     bool configChanged =
         (_sampleRate != newSampleRate) ||
@@ -492,31 +428,9 @@ class AudioService implements AudioClient {
 
     if (configChanged) {
       _logger.i(
-        "Audio Config Update: Codec=$codec, SampleRate=$newSampleRate, Bitrate=$newBitrate",
+        "Audio Config Update: Codec=$codec, SampleRate=$newSampleRate, Bitrate=$newBitrate (quality=$quality)",
       );
       _sampleRate = newSampleRate;
-
-      // If we are already running (channel open), we need to restart audio system
-      if (_channel != null) {
-        await _closeAudioSystem();
-        await _initAudioSystem();
-
-        // Re-start recording (if not in WebRTC mode)
-        if (!_isWebRTC) {
-          if (Platform.isWindows) {
-            await _windowsPlayer.startRecording(
-              (data) => _audioProcessingController.add(data),
-            );
-          } else {
-            _recorder.start();
-            _recorder.startStreamingData();
-            _audioDataSubscription?.cancel();
-            _audioDataSubscription = _recorder.uint8ListStream.listen((data) {
-              _audioProcessingController.add(data.rawData);
-            });
-          }
-        }
-      }
     } else {
       _logger.i(
         "Audio Config Update: Unchanged (Codec=$codec, Rate=$newSampleRate)",
@@ -544,77 +458,37 @@ class AudioService implements AudioClient {
 
   @override
   Future<void> connect(String roomId, String uid) async {
-    if (_channel != null) close();
-
     _myUid = uid;
     _currentRoomId = roomId;
 
     // Ensure Audio System is initialized (fixes first-time join bug on Desktop)
     await _initAudioSystem();
-    
+
     // Reset fade volume for smooth entry
     _fadeVolume = 0.0;
 
-    // Initialize WebRTC Manager
+    // Build ICE servers from config (may be empty if not yet received)
+    final iceServers = _buildIceServers();
+    _logger.i("Connecting with ${iceServers.length} ICE servers");
+
+    // Initialize WebRTC Manager for pure WebRTC audio
     _webRTCManager = WebRTCManager(
       myUid: uid,
       label: 'audio',
+      iceServers: iceServers.isNotEmpty ? iceServers : null,
       onSignal: (signal) {
         _outboundSignalController.add(signal);
       },
     );
 
-    final uri = Uri.parse('$baseUrl/ws/audio?uid=$uid&sid=$roomId');
-    _logger.i("Connecting Audio WS: $uri");
+    // Pure WebRTC mode - directly start WebRTC
+    _isWebRTC = true;
 
-    try {
-      _channel = WebSocketChannel.connect(uri);
-      await _channel!.ready;
+    _logger.i("Connecting to room $roomId with pure WebRTC audio");
 
-      _wsSubscription = _channel!.stream.listen(
-        (data) {
-          if (data is List<int>) {
-            // Binary
-            _handleAudioData(Uint8List.fromList(data));
-          }
-        },
-        onError: (e) {
-          _logger.e("Audio WS Error: $e");
-        },
-      );
-
-      // Start Recording (Default to WS initially, will update logic via updateRoomState)
-      // Actually we should start in WS mode until we get member list and decide to switch.
-      _isWebRTC = false;
-      await _startWSCapture();
-      
-    } catch (e) {
-      _logger.e("Audio Connect Error: $e");
-    }
-  }
-
-  Future<void> _startWSCapture() async {
-    if (Platform.isWindows) {
-      _windowsPlayer.startRecording((data) {
-        _audioProcessingController.add(data);
-      });
-      // _windowsPlayer.startPlayback();
-    } else {
-      _recorder.start();
-      _recorder.startStreamingData();
-      _audioDataSubscription = _recorder.uint8ListStream.listen((data) {
-        _audioProcessingController.add(data.rawData);
-      });
-    }
-  }
-
-  Future<void> _stopWSCapture() async {
-    if (Platform.isWindows) {
-      _windowsPlayer.stopRecording();
-    } else {
-      _recorder.stop();
-      _audioDataSubscription?.cancel();
-    }
+    // Start WebRTC (will receive member UIDs from updateRoomState)
+    await _webRTCManager!.start([]);
+    _startWebRTCStatsPolling();
   }
 
   @override
@@ -623,55 +497,9 @@ class AudioService implements AudioClient {
 
     // Cast members to RoomMember
     final roomMembers = members.cast<RoomMember>();
-    
-    // Logic:
-    // 1. If any member (other than me) does NOT support WebRTC, force WS.
-    // 2. If room count <= 3, use WebRTC (Mesh).
-    // 3. Else use WS.
-    
-    // Find my member info? Not strictly needed if we assume I support WebRTC (since I'm running this code).
 
-    // Determine target mode
-    // Force WS mode (Disable WebRTC for Audio per user request)
-    bool shouldBeWebRTC = false; // (roomMembers.length <= 3) && allSupportWebRTC;
-
-    // ignore: dead_code
-    if (shouldBeWebRTC) {
-      if (!_isWebRTC) {
-        _switchToWebRTC(roomMembers.map((e) => e.uid).toList());
-      } else {
-         // Update peers
-         _webRTCManager!.updatePeers(roomMembers.map((e) => e.uid).toList());
-      }
-    } else {
-      if (_isWebRTC) {
-        _switchToWS();
-      }
-    }
-  }
-
-  Future<void> _switchToWebRTC(List<String> memberUids) async {
-    _logger.i("Switching to WebRTC Mode");
-    _isWebRTC = true;
-    
-    // Stop WS Capture
-    await _stopWSCapture();
-
-    // Start WebRTC
-    await _webRTCManager!.start(memberUids);
-    _startWebRTCStatsPolling();
-  }
-
-  Future<void> _switchToWS() async {
-    _logger.i("Switching to WS Mode");
-    _stopWebRTCStatsPolling();
-    _isWebRTC = false;
-
-    // Stop WebRTC
-    await _webRTCManager!.stop();
-
-    // Start WS Capture
-    await _startWSCapture();
+    // Pure WebRTC mode - just update peers
+    _webRTCManager!.updatePeers(roomMembers.map((e) => e.uid).toList());
   }
 
   void _startWebRTCStatsPolling() {
@@ -710,17 +538,17 @@ class AudioService implements AudioClient {
           // final payload = data['payload'];
           // final senderUid = data['senderUid']; // Assuming senderUid is added by SignalingService or wrapper?
       // Wait, SignalingService.onMessage gives raw JSON.
-      // We need to know WHO sent it. 
+      // We need to know WHO sent it.
       // The protocol: {"method": "signal", "params": {...}} from server?
       // No, server forwards signal to target.
       // The payload received usually contains sender info?
       // Let's check server/signal.go or peer.go.
       // Usually signal message from server is: {"method": "signal", "params": {"uid": "sender_uid", "target": "me", "type": "...", "payload": ...}}
       // So data is the 'params' map.
-      
+
       // Use 'sender' (from server) or 'uid' (legacy/fallback)
       String? sender = data['sender'] ?? data['uid'];
-      if (sender == null && data['target'] == 'sfu') {
+      if (sender != null && data['target'] == 'sfu') {
         sender = 'sfu';
       }
 
@@ -730,13 +558,112 @@ class AudioService implements AudioClient {
     }
   }
 
+  /// Build ICE servers from stored config
+  /// If no TURN server is configured, uses current server domain as default TURN
+  List<Map<String, dynamic>> _buildIceServers() {
+    final servers = <Map<String, dynamic>>[];
+
+    // Add STUN servers
+    if (_iceConfig['stun'] != null) {
+      final stunList = _iceConfig['stun'];
+      if (stunList is List) {
+        for (var server in stunList) {
+          if (server is String) {
+            servers.add({'urls': server});
+          } else if (server is Map) {
+            servers.add({'urls': server['url'] ?? server['urls']});
+          }
+        }
+      }
+    }
+
+    // Check if we have TURN servers from server config
+    bool hasTurnFromServer = _iceConfig['turn'] != null;
+
+    // Add TURN servers from server config
+    if (hasTurnFromServer) {
+      final turnList = _iceConfig['turn'];
+      if (turnList is List) {
+        for (var server in turnList) {
+          if (server is String) {
+            servers.add({
+              'urls': server,
+              'username': _iceConfig['username'],
+              'credential': _iceConfig['password'],
+            });
+          } else if (server is Map) {
+            servers.add({
+              'urls': server['url'] ?? server['urls'],
+              'username': server['username'] ?? _iceConfig['username'],
+              'credential': server['password'] ?? server['credential'] ?? _iceConfig['password'],
+            });
+          }
+        }
+      }
+    }
+
+    // If no TURN server configured, use current server as default TURN
+    if (!hasTurnFromServer) {
+      final turnHost = _extractHostFromUrl(baseUrl);
+      if (turnHost != null && turnHost.isNotEmpty) {
+        servers.add({
+          'urls': 'turn:$turnHost:3478?transport=udp',
+        });
+        _logger.i("Using default TURN server: turn:$turnHost:3478");
+      }
+    }
+
+    return servers;
+  }
+
+  /// Extract host/domain from URL
+  String? _extractHostFromUrl(String url) {
+    try {
+      // Handle ws://, wss://, http://, https://
+      String normalizedUrl = url;
+      if (normalizedUrl.startsWith('wss://')) {
+        normalizedUrl = normalizedUrl.substring(6);
+      } else if (normalizedUrl.startsWith('ws://')) {
+        normalizedUrl = normalizedUrl.substring(5);
+      } else if (normalizedUrl.startsWith('https://')) {
+        normalizedUrl = normalizedUrl.substring(8);
+      } else if (normalizedUrl.startsWith('http://')) {
+        normalizedUrl = normalizedUrl.substring(7);
+      }
+
+      // Remove port if present
+      final portIndex = normalizedUrl.indexOf(':');
+      if (portIndex > 0) {
+        normalizedUrl = normalizedUrl.substring(0, portIndex);
+      }
+
+      // Remove path if present
+      final pathIndex = normalizedUrl.indexOf('/');
+      if (pathIndex > 0) {
+        normalizedUrl = normalizedUrl.substring(0, pathIndex);
+      }
+
+      if (normalizedUrl.isNotEmpty) {
+        return normalizedUrl;
+      }
+    } catch (e) {
+      _logger.w("Failed to extract host from URL: $url, error: $e");
+    }
+    return null;
+  }
+
+  @override
+  void setIceConfig(Map<String, dynamic> config) {
+    _iceConfig.clear();
+    _iceConfig.addAll(config);
+    final servers = _buildIceServers();
+    _logger.i("ICE config updated: ${servers.length} servers");
+  }
+
   @override
   Future<void> close() async {
     await _closeAudioSystem();
-    _channel?.sink.close();
-    _channel = null;
-    _wsSubscription?.cancel();
-    
+
     _stopWebRTCStatsPolling();
     await _webRTCManager?.stop();
     _webRTCManager = null;
@@ -788,10 +715,19 @@ class AudioService implements AudioClient {
   }
 
   Future<void> _processFrame(List<double> frame) async {
-    // Apply Gain
-    if (_micGain != 1.0) {
+    // Apply Gain (always apply to ensure consistent volume)
+    if (_micGain != 1.0 || true) {  // Always apply for consistent behavior
       for (var i = 0; i < frame.length; i++) {
         frame[i] *= _micGain;
+      }
+    }
+
+    // Clamp to prevent clipping
+    for (var i = 0; i < frame.length; i++) {
+      if (frame[i] > 1.0) {
+        frame[i] = 1.0;
+      } else if (frame[i] < -1.0) {
+        frame[i] = -1.0;
       }
     }
 
@@ -912,198 +848,7 @@ class AudioService implements AudioClient {
       }
     }
     
-    bool pass = finalGain > 0.001; // Cutoff silence
-
-    if (pass && _channel != null) {
-      Uint8List payload;
-
-      if (_targetCodec == 'opus') {
-        if (_opusEncoder == null) {
-          if (DateTime.now().difference(_lastErrorTime).inSeconds > 5) {
-            _lastErrorTime = DateTime.now();
-            _errorController.add("Opus编码器未就绪，发送失败");
-          }
-          return;
-        }
-        // Opus Encode
-        final input = Float32List.fromList(frame);
-        final opusData = _opusEncoder!.encodeFloat(input: input);
-
-        // [SEQ(2)][HEADER_LEN(1)][CODEC(1)][CH(1)][RATE(4)][DATA]
-        const int headerLen = 6;
-        payload = Uint8List(2 + 1 + headerLen + opusData.length);
-        final view = ByteData.sublistView(payload);
-        view.setUint16(0, _seq, Endian.little);
-        view.setUint8(2, headerLen);
-        view.setUint8(3, 0); // Codec: Opus
-        view.setUint8(4, _channels);
-        view.setUint32(5, _sampleRate, Endian.little);
-        payload.setAll(2 + 1 + headerLen, opusData);
-      } else if (_targetCodec == 'pcm16') {
-        // PCM Int16
-        final bytes = Uint8List(frame.length * 2);
-        final view = ByteData.sublistView(bytes);
-        for (int i = 0; i < frame.length; i++) {
-          final sample = (frame[i] * 32767).toInt().clamp(-32768, 32767);
-          view.setInt16(i * 2, sample, Endian.little);
-        }
-
-        const int headerLen = 6;
-        payload = Uint8List(2 + 1 + headerLen + bytes.length);
-        final pv = ByteData.sublistView(payload);
-        pv.setUint16(0, _seq, Endian.little);
-        pv.setUint8(2, headerLen);
-        pv.setUint8(3, 1); // Codec: PCM16
-        pv.setUint8(4, _channels);
-        pv.setUint32(5, _sampleRate, Endian.little);
-        payload.setAll(2 + 1 + headerLen, bytes);
-      } else {
-        // PCM Float32 (fallback or explicit pcmf32)
-        final bytes = Uint8List(frame.length * 4);
-        final view = ByteData.sublistView(bytes);
-        for (int i = 0; i < frame.length; i++) {
-          view.setFloat32(i * 4, frame[i], Endian.little);
-        }
-
-        const int headerLen = 6;
-        payload = Uint8List(2 + 1 + headerLen + bytes.length);
-        final pv = ByteData.sublistView(payload);
-        pv.setUint16(0, _seq, Endian.little);
-        pv.setUint8(2, headerLen);
-        pv.setUint8(3, 2); // Codec: PCMF32
-        pv.setUint8(4, _channels);
-        pv.setUint32(5, _sampleRate, Endian.little);
-        payload.setAll(2 + 1 + headerLen, bytes);
-      }
-
-      // Send to WebSocket
-      if (!_isWebRTC) {
-        try {
-          _channel?.sink.add(payload);
-          _seq = (_seq + 1) % 65536;
-        } catch (e) {
-          // ignore
-        }
-      }
-    }
+    // WebRTC mode: audio is sent via WebRTC data channels, not this path
   }
 
-  void _handleAudioData(Uint8List data) {
-    if (_isWebRTC) return;
-
-    try {
-      if (data.isEmpty) return;
-
-      int uidLen = data[0];
-      if (data.length < 1 + uidLen) return;
-
-      String uid = String.fromCharCodes(data.sublist(1, 1 + uidLen));
-      Uint8List audioPacket = data.sublist(1 + uidLen);
-
-      if (audioPacket.length < 9) return;
-
-      final view = ByteData.sublistView(audioPacket);
-      // int seq = view.getUint16(0, Endian.little);
-      int headerLen = view.getUint8(2);
-      int codecId = view.getUint8(3); // 0=Opus, 1=PCM16, 2=PCMF32
-      int channels = view.getUint8(4);
-      int sampleRate = view.getUint32(5, Endian.little);
-
-      int offset = 2 + 1 + headerLen;
-      if (offset > audioPacket.length) return;
-
-      Uint8List payload = audioPacket.sublist(offset);
-
-      Float32List pcm;
-
-      if (codecId == 0) {
-        // Opus
-        if (!_opusDecoders.containsKey(uid)) {
-          try {
-            _opusDecoders[uid] = SimpleOpusDecoder(
-              sampleRate: sampleRate,
-              channels: channels,
-            );
-          } catch (e) {
-            _logger.e("Decoder init failed for $uid: $e");
-            return;
-          }
-        }
-        final decoder = _opusDecoders[uid]!;
-        // Note: If remote params change, we might need to recreate decoder.
-        // For now, assume consistent stream parameters.
-
-        try {
-          pcm = decoder.decodeFloat(input: payload, loss: 0);
-        } catch (e) {
-          // Decode failed
-          return;
-        }
-      } else if (codecId == 1) {
-        // PCM16
-        final int16 = payload.buffer.asInt16List(
-          payload.offsetInBytes,
-          payload.lengthInBytes ~/ 2,
-        );
-        pcm = Float32List(int16.length);
-        for (int i = 0; i < int16.length; i++) {
-          pcm[i] = int16[i] / 32768.0;
-        }
-      } else {
-        // PCM Float32
-        final f32 = payload.buffer.asFloat32List(
-          payload.offsetInBytes,
-          payload.lengthInBytes ~/ 4,
-        );
-        pcm = f32; // View is fine if we copy or write immediately
-      }
-
-      // Calculate volume for UI
-      double peak = 0;
-      for (var x in pcm) {
-        if (x.abs() > peak) peak = x.abs();
-      }
-      _remoteVolumeController.add(MapEntry(uid, peak));
-
-      // Check Local Mute
-      if (_mutedPeers.contains(uid)) {
-        return;
-      }
-
-      // Check Global Speaker Mute
-      if (_isSpeakerMuted) {
-        return;
-      }
-
-      // Play
-      // Convert Float32 to Int16 for playback
-      final int16List = Int16List(pcm.length);
-      
-      double peerVol = _peerVolumes[uid] ?? 1.0;
-      
-      for (int i = 0; i < pcm.length; i++) {
-        double val = pcm[i];
-        
-        // Master Gain
-        if (_speakerGain != 1.0) {
-          val *= _speakerGain;
-        }
-        
-        // Peer Gain
-        if (peerVol != 1.0) {
-          val *= peerVol;
-        }
-
-        int16List[i] = (val * 32767).toInt().clamp(-32768, 32767);
-      }
-
-      if (Platform.isWindows) {
-        _windowsPlayer.feedSafe(int16List);
-      } else {
-        FlutterPcmSound.feed(PcmArrayInt16.fromList(int16List));
-      }
-    } catch (e) {
-      _logger.e("Handle Audio Error: $e");
-    }
-  }
 }
